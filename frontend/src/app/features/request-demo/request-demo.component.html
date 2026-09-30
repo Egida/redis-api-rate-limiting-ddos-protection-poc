@@ -1,0 +1,162 @@
+<section class="demo" aria-labelledby="demo-heading">
+  <h2 id="demo-heading">Run request demo</h2>
+  <p class="note">
+    Requests go to this local POC only, one at a time. Past the configured limit the API answers
+    <strong>429</strong> on purpose &mdash; that is the behaviour being demonstrated.
+  </p>
+
+  <div class="route-note" role="note">{{ route().note }}</div>
+
+  <form class="controls" (submit)="$event.preventDefault(); onStart()">
+    <div class="field">
+      <label for="demo-route">Route</label>
+      <select
+        id="demo-route"
+        name="route"
+        [ngModel]="routeId()"
+        (ngModelChange)="routeId.set($event)"
+        [disabled]="running()"
+      >
+        @for (r of routes; track r.id) {
+          <option [value]="r.id">{{ r.label }} &mdash; limit {{ r.expectedLimit }} per minute per {{ r.identity === 'USER' ? 'user' : 'IP' }}</option>
+        }
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="demo-count">Requests to send</label>
+      <input
+        id="demo-count"
+        name="count"
+        type="number"
+        inputmode="numeric"
+        min="1"
+        [max]="maxCount"
+        [ngModel]="requestCount()"
+        (ngModelChange)="onCountChange($event)"
+        [disabled]="running()"
+      />
+      <p class="hint">Default 20, maximum {{ maxCount }}.</p>
+    </div>
+
+    @if (needsAuth()) {
+      <div class="field auth">
+        <label for="demo-user">HTTP Basic username</label>
+        <input
+          id="demo-user"
+          name="username"
+          type="text"
+          autocomplete="username"
+          [ngModel]="username()"
+          (ngModelChange)="username.set($event)"
+          [disabled]="running()"
+        />
+        <label for="demo-password" class="second">HTTP Basic password</label>
+        <input
+          id="demo-password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          [ngModel]="password()"
+          (ngModelChange)="password.set($event)"
+          [disabled]="running()"
+        />
+        <p class="hint">Demo-only credentials, held in memory for this run and never stored or logged.</p>
+      </div>
+    }
+
+    <div class="actions">
+      <button type="submit" class="primary" [disabled]="running()">
+        {{ running() ? 'Running…' : 'Start demo' }}
+      </button>
+      <button type="button" (click)="onCancel()" [disabled]="!running()">Cancel</button>
+    </div>
+  </form>
+
+  @if (formError(); as message) {
+    <p class="form-error" role="alert">{{ message }}</p>
+  }
+
+  @if (running() || progressSent() > 0) {
+    <div class="progress">
+      <div
+        class="progress-track"
+        role="progressbar"
+        [attr.aria-valuenow]="progressSent()"
+        [attr.aria-valuemin]="0"
+        [attr.aria-valuemax]="progressTotal()"
+        aria-label="Demo request progress"
+      >
+        <div class="progress-fill" [style.width.%]="progressPercent()"></div>
+      </div>
+      <p class="progress-text" role="status" aria-live="polite">
+        {{ progressSent() }} of {{ progressTotal() }} sent
+      </p>
+    </div>
+  }
+
+  @if (summary(); as result) {
+    <div class="result" [class.inconclusive]="result.inconclusive">
+      <h3>Observed result</h3>
+      <ul>
+        <li>Sent {{ result.totalSent }} request{{ result.totalSent === 1 ? '' : 's' }} to {{ route().label }}.</li>
+        <li>Allowed (2xx): {{ result.success }}</li>
+        <li>Rejected (429): {{ result.rejected }}</li>
+        <li>Other responses: {{ result.error }}</li>
+        <li>
+          @if (result.first429Index !== null) {
+            First 429 at request #{{ result.first429Index }}.
+          } @else {
+            No 429 observed.
+          }
+        </li>
+        <li>Elapsed: {{ (result.elapsedMs / 1000).toFixed(1) }}s</li>
+        <li>
+          @if (result.cancelled) {
+            Run cancelled.
+          } @else if (result.completed) {
+            Run completed.
+          } @else {
+            Run stopped early.
+          }
+        </li>
+        <li class="compare">
+          @if (result.first429Index === route().expectedLimit + 1) {
+            Observed first 429 matches the configured limit of {{ route().expectedLimit }} per window.
+          } @else if (result.first429Index !== null) {
+            Configured limit is {{ route().expectedLimit }} per window; the first 429 came at a
+            different index, which usually means the window rolled over or the route was partly used.
+          } @else {
+            Configured limit is {{ route().expectedLimit }} per window.
+          }
+        </li>
+      </ul>
+      <p class="result-note">
+        Browser-observed since this page opened. Statuses &mdash; {{ statusBreakdown() || 'none' }}.
+        These counts come from real responses, not from the configured limit.
+      </p>
+      @if (result.lastError; as failure) {
+        <p class="result-error">
+          Stopped at request #{{ failure.index }}: {{ failure.reason }}.
+        </p>
+      }
+    </div>
+  }
+
+  @if (summary()?.lastRejection; as rejection) {
+    <div class="inspector">
+      <h3>Last rejected response</h3>
+      <dl>
+        <div><dt>Status</dt><dd>HTTP {{ rejection.status }}</dd></div>
+        <div><dt>Retry-After</dt><dd>{{ rejection.headers.retryAfter ? rejection.headers.retryAfter + ' s' : 'not sent' }}</dd></div>
+        <div><dt>X-RateLimit-Limit</dt><dd>{{ rejection.headers.limit ?? 'not sent' }}</dd></div>
+        <div><dt>X-RateLimit-Remaining</dt><dd>{{ rejection.headers.remaining ?? 'not sent' }}</dd></div>
+        <div><dt>X-RateLimit-Policy</dt><dd>{{ rejection.headers.policy ?? 'not sent' }}</dd></div>
+      </dl>
+      <details>
+        <summary>Response detail (message only)</summary>
+        <p class="detail">{{ rejection.message ?? 'No message returned.' }}</p>
+      </details>
+    </div>
+  }
+</section>

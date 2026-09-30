@@ -1,0 +1,124 @@
+/* RateGuard — calm, high-contrast operations console.
+   Colour is never the only signal: every state also carries a text label. */
+
+:root {
+  --bg: #0d1420;
+  --surface: #151d2b;
+  --surface-2: #1b2534;
+  --border: #2a374a;
+  --text: #e6edf6;
+  --text-dim: #9fb0c6;
+  --text-faint: #7b8ba3;
+
+  --ok: #2fbf9b;
+  --warn: #e0a33a;
+  --bad: #e2564d;
+  --accent: #4a9fd8;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --radius: 6px;
+  --font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  background: var(--accent);
+  color: #06121c;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+}
+
+.skip-link:focus {
+  left: var(--space-3);
+  top: var(--space-3);
+  z-index: 10;
+}
+
+input,
+select {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  font-size: 0.9rem;
+  min-height: 40px;
+}
+
+button {
+  font: inherit;
+}
+
+button.primary {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #06121c;
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-4);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 40px;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

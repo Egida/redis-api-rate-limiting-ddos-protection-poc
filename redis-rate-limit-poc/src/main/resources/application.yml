@@ -1,0 +1,67 @@
+spring:
+  application:
+    name: redis-rate-limit-poc
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+      connect-timeout: 2s
+      lettuce:
+        pool:
+          enabled: true
+          max-active: 16
+          max-idle: 8
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    com.example.ratelimit: INFO
+
+rate-limit:
+  enabled: true
+  key-prefix: rate-limit:v1
+  # Empty means X-Forwarded-For / X-Real-IP are ignored entirely and the socket peer is used.
+  # Populate only with the CIDRs of reverse proxies you actually operate, e.g. ["10.0.0.0/8"].
+  trusted-proxies: []
+  # Used when Redis is unreachable; individual policies may override.
+  on-redis-error: fail_open
+  ttl-grace: 1s
+  excluded-paths:
+    - /actuator/**
+    - /error
+  excluded-methods:
+    - OPTIONS
+    - HEAD
+  policies:
+    - id: products-read
+      method: GET
+      path: /api/products
+      limit: 100
+      window: 60s
+      identity: IP
+    - id: login-attempt
+      method: POST
+      path: /api/login
+      limit: 10
+      window: 60s
+      identity: IP
+      # Credential endpoints fail closed: a lost Redis must not become unlimited logins.
+      on-redis-error: fail_closed
+    - id: order-create
+      method: POST
+      path: /api/orders
+      limit: 30
+      window: 60s
+      identity: USER

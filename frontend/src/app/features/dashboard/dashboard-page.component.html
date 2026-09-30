@@ -1,0 +1,153 @@
+<section class="overview" aria-labelledby="overview-heading">
+  <h2 id="overview-heading">Overview</h2>
+  <ul class="cards">
+    <li class="card">
+      <h3>Redis</h3>
+      <p class="metric" [class.ok]="redisText() === 'Connected'" [class.bad]="redisText() === 'Unavailable'">
+        {{ redisText() }}
+      </p>
+      <p class="detail">
+        @if (redisText() === 'Connected') {
+          Overall Actuator health is UP. This POC exposes no latency, so none is shown.
+        } @else if (redisText() === 'Unavailable') {
+          Actuator reports DOWN. In this POC that means a health indicator failed; stopping Redis
+          reproduces it.
+        } @else {
+          Actuator could not be reached from this page.
+        }
+      </p>
+    </li>
+
+    <li class="card">
+      <h3>Allowed requests</h3>
+      <p class="metric ok">
+        @if (snapshot(); as data) {
+          {{ data.countersAvailable ? data.allowed : '—' }}
+        } @else {
+          —
+        }
+      </p>
+      <p class="detail">Actuator counter total, outcome&#61;allowed</p>
+    </li>
+
+    <li class="card">
+      <h3>Rejected requests</h3>
+      <p class="metric bad">
+        @if (snapshot(); as data) {
+          {{ data.countersAvailable ? data.rejected : '—' }}
+        } @else {
+          —
+        }
+      </p>
+      <p class="detail">Actuator counter total, HTTP 429</p>
+    </li>
+
+    <li class="card">
+      <h3>Active policies</h3>
+      <p class="metric">{{ policyCount() ?? '—' }}</p>
+      <p class="detail">
+        @if (usingSamplePolicies()) {
+          Unknown — showing sample rows
+        } @else {
+          Read from the API
+        }
+      </p>
+    </li>
+  </ul>
+</section>
+
+<section aria-labelledby="policies-heading">
+  <h2 id="policies-heading">Rate-limit policies</h2>
+  @if (usingSamplePolicies()) {
+    <p class="source sample">
+      <strong>Sample policy configuration.</strong> The API could not be reached, so these are the
+      shipped defaults from <code>application.yml</code>, not live data.
+    </p>
+  } @else {
+    <p class="source">Read from the API — read-only.</p>
+  }
+
+  <div class="table-scroll">
+    <table>
+      <caption class="visually-hidden">Configured rate-limit policies</caption>
+      <thead>
+        <tr>
+          <th scope="col">Route</th>
+          <th scope="col">Method</th>
+          <th scope="col">Limit</th>
+          <th scope="col">Window</th>
+          <th scope="col">Identity</th>
+          <th scope="col">Redis failure mode</th>
+        </tr>
+      </thead>
+      <tbody>
+        @if (loading() && !snapshot()) {
+          <tr><td colspan="6" class="muted">Loading…</td></tr>
+        } @else {
+          @for (policy of policies(); track policy.id) {
+            <tr>
+              <td class="mono">{{ policy.path }}</td>
+              <td>{{ policy.method }}</td>
+              <td>{{ policy.limit }}</td>
+              <td>{{ formatWindow(policy.windowSeconds) }}</td>
+              <td>{{ policy.identity === 'USER' ? 'Authenticated user' : 'Client IP' }}</td>
+              <td>
+                <span
+                  class="pill"
+                  [class.closed]="policy.redisFailureMode === 'FAIL_CLOSED'"
+                >{{ policy.redisFailureModeLabel }}</span>
+              </td>
+            </tr>
+          }
+        }
+      </tbody>
+    </table>
+  </div>
+  <p class="footnote">
+    Policies are configured in <code>application.yml</code> and cannot be edited from this console.
+  </p>
+</section>
+
+<section aria-labelledby="activity-heading">
+  <h2 id="activity-heading">Request activity</h2>
+  <div class="activity">
+    @if (snapshot(); as data) {
+      @if (data.countersAvailable) {
+        <div class="bar-row">
+          <span class="bar-label">Allowed</span>
+          <div class="bar-track"><div class="bar-fill ok" [style.width.%]="allowedShare()"></div></div>
+          <span class="bar-value">{{ data.allowed }}</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Rejected</span>
+          <div class="bar-track"><div class="bar-fill bad" [style.width.%]="rejectedShare()"></div></div>
+          <span class="bar-value">{{ data.rejected }}</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Redis error</span>
+          <div class="bar-track"><div class="bar-fill warn" [style.width.%]="redisErrorShare()"></div></div>
+          <span class="bar-value">{{ data.redisError }}</span>
+        </div>
+        <p class="summary">
+          Actuator counter totals since startup: {{ data.total }} limited requests —
+          {{ data.allowed }} allowed, {{ data.rejected }} rejected, {{ data.redisError }} hit a Redis
+          error.
+          @if (data.neverRecorded.length) {
+            <span class="muted">({{ data.neverRecorded.join(', ') }})</span>
+          }
+        </p>
+      } @else {
+        <p class="summary muted">
+          @if (data.countersReason === 'no-data') {
+            No counter data yet. The ratelimit.requests meter appears once a rate-limited request has
+            been served.
+          } @else {
+            Actuator metrics unavailable ({{ data.countersReason }}).
+          }
+        </p>
+      }
+    } @else {
+      <p class="summary muted">Loading counters…</p>
+    }
+  </div>
+</section>

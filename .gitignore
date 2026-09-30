@@ -1,0 +1,38 @@
+# Build output
+redis-rate-limit-poc/target/
+node_modules/
+dist/
+.angular/
+coverage/
+
+# Local agent / editor wiring for this machine.
+# These hardcode absolute paths (e.g. C:\Users\<name>\Downloads\...) and are
+# useless to anyone else, so they stay out of the repository.
+.claude/
+.codex/
+.cursor/
+.mcp/
+.opencode/
+/.vscode/
+/hooks/
+/opencode.json
+/copilot-hooks.json
+/.context-layer.json
+
+# Agent session scratchpad: stale by design, names local sibling repos and pids.
+.lean-ledger.md
+
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+
+# Logs and OS noise
+*.log
+npm-debug.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,38 @@
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<header class="app-header">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">RG</span>
+    <div>
+      <h1>RateGuard</h1>
+      <p class="brand-sub">API Protection Console</p>
+    </div>
+    <span class="badge badge-env">LOCAL POC</span>
+  </div>
+
+  <div class="header-status">
+    <p class="service-state" role="status" aria-live="polite">
+      <span [class]="dotClass()" aria-hidden="true"></span>
+      <span>{{ stateText() }}</span>
+    </p>
+    <p class="last-checked">{{ lastCheckedText() }}</p>
+    <button type="button" (click)="refresh()" class="btn-secondary">Refresh</button>
+  </div>
+</header>
+
+<main id="main">
+  <p class="scope-note">
+    Counters are cumulative Actuator totals since the application started. They are not
+    per-minute rates, and they reset when the app restarts.
+  </p>
+
+  <app-dashboard-page [snapshot]="snapshot()" />
+  <app-request-demo />
+</main>
+
+<footer>
+  <p>
+    RateGuard is a local demonstration console for the Redis rate-limiting POC. It exposes no Redis
+    keys, client addresses, usernames or credentials.
+  </p>
+</footer>
