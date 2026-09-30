@@ -276,5 +276,6 @@ Stated plainly, because a POC that hides these is not a POC:
 | This README | Start here — architecture, how to run, evidence |
 | [`redis-rate-limit-poc/docs/api-rate-limiting-poc.md`](redis-rate-limit-poc/docs/api-rate-limiting-poc.md) | Deep design: algorithm, policy model, failure modes, test strategy |
 | [`redis-rate-limit-poc/README.md`](redis-rate-limit-poc/README.md) | Backend-specific commands |
+| [`docs/reports/rate-limiting-poc-report.md`](docs/reports/rate-limiting-poc-report.md) | This README as a standalone report, with the screenshots |
 | [`docs/reports/`](docs/reports/) | PDF report — same content, printable |
 | Screenshots | `docs/screenshots/`, referenced inline above |
