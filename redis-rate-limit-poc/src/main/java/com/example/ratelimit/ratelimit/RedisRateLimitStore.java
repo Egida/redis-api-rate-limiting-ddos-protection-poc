@@ -50,6 +50,47 @@ public class RedisRateLimitStore implements RateLimitStore {
             return {count, redis.call('PTTL', KEYS[1])}
             """, List.class);
 
+    /**
+     * Atomic multi-policy batch. KEYS[i] is a counter key; ARGV[(i-1)*2+1] its limit and
+     * ARGV[(i-1)*2+2] its TTL in millis.
+     *
+     * <p>Phase one reads every counter and returns early on the first exhausted policy, charging
+     * nothing. Phase two increments every counter only when all policies allow. Returns
+     * {@code {0, blockedIndex1Based, pttl}} on denial or {@code {1, c1, t1, c2, t2, ...}} on success.
+     *
+     * <p>Single Redis instance only. Under Redis Cluster the keys would have to share a hash slot
+     * (hash tags), because a script cannot span slots; this POC runs one Redis, so no tagging is
+     * applied and no cross-slot claim is made.
+     */
+    private static final RedisScript<List> BATCH = new DefaultRedisScript<>("""
+            local n = #KEYS
+            for i = 1, n do
+              local raw = redis.call('GET', KEYS[i])
+              local count = 0
+              if raw then
+                count = tonumber(raw)
+              end
+              if count >= tonumber(ARGV[(i - 1) * 2 + 1]) then
+                return {0, i, redis.call('PTTL', KEYS[i])}
+              end
+            end
+            local out = {1}
+            for i = 1, n do
+              local count = redis.call('INCR', KEYS[i])
+              if count == 1 then
+                redis.call('PEXPIRE', KEYS[i], ARGV[(i - 1) * 2 + 2])
+              end
+              local ttl = redis.call('PTTL', KEYS[i])
+              if ttl < 0 then
+                redis.call('PEXPIRE', KEYS[i], ARGV[(i - 1) * 2 + 2])
+                ttl = tonumber(ARGV[(i - 1) * 2 + 2])
+              end
+              out[#out + 1] = count
+              out[#out + 1] = ttl
+            end
+            return out
+            """, List.class);
+
     private final StringRedisTemplate redis;
     private final String keyPrefix;
     private final Duration ttlGrace;
@@ -109,6 +150,50 @@ public class RedisRateLimitStore implements RateLimitStore {
             long effectiveTtl = ttl >= 0 ? ttl : expectedTtlMillis;
             long retryAfter = Math.max(1, Math.ceilDiv(effectiveTtl, 1000));
             return RateLimitDecision.reject(policy.limit(), Duration.ofSeconds(retryAfter));
+        } catch (DataAccessException e) {
+            throw new RateLimitStoreUnavailableException("redis unavailable", e);
+        }
+    }
+
+    @Override
+    public BatchDecision consumeAll(java.util.List<Charge> charges, long nowMillis) {
+        if (charges.isEmpty()) {
+            throw new IllegalArgumentException("consumeAll requires at least one charge");
+        }
+        var keys = new java.util.ArrayList<String>(charges.size());
+        var args = new java.util.ArrayList<String>(charges.size() * 2);
+        var ttls = new java.util.ArrayList<Long>(charges.size());
+        for (Charge charge : charges) {
+            long windowMillis = charge.policy().window().toMillis();
+            long elapsed = Math.floorMod(nowMillis, windowMillis);
+            long ttlMillis = (windowMillis - elapsed) + ttlGrace.toMillis();
+            keys.add(key(charge.policy(), charge.identityType(), charge.identity(), nowMillis));
+            args.add(String.valueOf(charge.policy().limit()));
+            args.add(String.valueOf(ttlMillis));
+            ttls.add(ttlMillis);
+        }
+
+        try {
+            @SuppressWarnings("unchecked")
+            List<Long> result = redis.execute(BATCH, keys, args.toArray(new String[0]));
+            if (result == null || result.isEmpty() || result.get(0) == null) {
+                throw new RateLimitStoreUnavailableException("redis returned no batch decision", null);
+            }
+            if (result.get(0) == 0) {
+                int blockedIndex = result.get(1).intValue() - 1;
+                Charge blocked = charges.get(blockedIndex);
+                long pttl = result.get(2);
+                long effectiveTtl = pttl >= 0 ? pttl : ttls.get(blockedIndex);
+                long retryAfter = Math.max(1, Math.ceilDiv(effectiveTtl, 1000));
+                return new BatchDecision(blockedIndex,
+                        RateLimitDecision.reject(blocked.policy().limit(), Duration.ofSeconds(retryAfter)));
+            }
+            // Success layout: {1, c1, t1, c2, t2, ...}. The governing decision is the first policy's,
+            // matching the most-specific-first order the enforcer supplies.
+            Charge governing = charges.get(0);
+            long count = result.get(1);
+            return new BatchDecision(-1, RateLimitDecision.allow(governing.policy().limit(),
+                    (int) Math.max(0, governing.policy().limit() - count)));
         } catch (DataAccessException e) {
             throw new RateLimitStoreUnavailableException("redis unavailable", e);
         }

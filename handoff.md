@@ -146,9 +146,9 @@ bleeding into one another.
 1. `shouldNotFilter` — skip if the global kill switch is off, the method/path is excluded, or the path is `/api/admin/`.
 2. `enforcer.applicablePolicies(method, uri)` — no match means **no limit at all**, the chain proceeds.
 3. Resolve identity **per policy**: USER uses the authenticated principal with IP fallback; GLOBAL uses the constant `global`; other scopes use the gated client IP.
-4. `enforcer.enforceResolved(...)` — peek every applicable policy without spending quota; if all allow, commit them in order.
+4. `enforcer.enforceResolved(...)` — one atomic `consumeAll` batch: a single Lua script inspects every applicable counter before incrementing any of them.
 5. Allow → set `X-RateLimit-Limit` / `X-RateLimit-Remaining` from the governing policy, continue.
-6. Reject → record the metric, write 429 with headers and a JSON body naming every consulted policy. A preflight denial spends no quota; a commit-time race can still reject after earlier commits, and that bias is toward rejecting, never over-admitting.
+6. Reject → record the metric, write 429 with headers and a JSON body naming every consulted policy. A denial charges nothing anywhere; single-Redis only, so no Cluster hash-slot claim is made.
 
 ### Identity — `RateLimitIdentityResolver.java:50-60`
 
@@ -285,7 +285,7 @@ access method=GET path=/api/products status=200 outcome=ALLOWED durationMs=5 cli
 
 ---
 
-## 6. Tests — 86 JVM tests across 10 classes
+## 6. Tests — 88 JVM tests across 10 classes
 
 | File | @Test | What it establishes |
 |---|---|---|
@@ -295,7 +295,7 @@ access method=GET path=/api/products status=200 outcome=ALLOWED durationMs=5 cli
 | `RateLimitHttpIntegrationTest` | 7 | Below-limit passes, beyond-limit 429 with retry info, per-user isolation, authenticated route limits by user not IP, 401 is not rate-limited, excluded routes pass, bounded metric labels |
 | `RateLimitRedisFailureTest` | 9 | Fail-closed 503, fail-open passes, global default applies, kill switch skips the store, unlisted route uncounted, fail-closed makes no quota claim, most-specific policy wins, duplicate id fails startup |
 | `RateLimitConfigurationValidationTest` | 6 | Config binding and validation |
-| `RedisRateLimitStoreTest` | 6 | Allow-then-reject, identities independent, policies independent, TTL set and key gone after window, key shape, `twoStoreInstancesShareOneLimit` |
+| `RedisRateLimitStoreTest` | 8 | Allow-then-reject, identities independent, policies independent, TTL set and key gone after window, key shape, `twoStoreInstancesShareOneLimit`, atomic batch denial charges nothing, concurrent batches take the last unit exactly once |
 | `PocMetadataControllerTest` | 6 | `/api/poc/policies` contract; asserts `/index.html` → 404 |
 | `RateLimitWindowBoundaryTest` | 4 | Fresh quota every window, Retry-After reflects real time left, keys carry policy and hashed identity, preflight denial charges nothing |
 | `RateLimitConcurrencyTest` | 1 | `exactAllowanceUnderParallelLoad` |
@@ -328,7 +328,7 @@ Measured in this environment, not quoted from anywhere.
 
 | Command | Result |
 |---|---|
-| `mvn -B -o clean test` | Tests run 86, Failures 0, Errors 0 — BUILD SUCCESS |
+| `mvn -B -o clean test` | Tests run 88, Failures 0, Errors 0 — BUILD SUCCESS |
 | `npm test` | 5 suites, 25/25 passed, 4.46 s |
 | `npm run build` | Initial 244.44 kB, Transfer 66.15 kB, bundle 4.847 s |
 | `verify-all.ps1 -SkipBuild -SkipUnitTests` | 133.50 s, every step OK |
@@ -408,7 +408,7 @@ Verified against the live DOM: title `RateGuard - API Protection Console`, Redis
 | `43272c5` | Initial commit — 83 files |
 | `b890e73` | Markdown report + README doc-map link |
 | see `git log` | Angular 22 version correction across README, Markdown report, HTML report, regenerated PDF |
-| **uncommitted** | Multi-policy preflight/commit composition, per-policy identity, read-only fixed-window peek, and security/doc corrections |
+| **uncommitted** | Atomic multi-policy batch (`consumeAll`): one Lua script inspects all counters before charging any; denial charges nothing |
 
 ### The Angular version error, and the fix
 
@@ -580,7 +580,7 @@ The brief this POC answers has 11 scope items and 16 acceptance criteria. All ar
 | 12 | Documented key convention | `RedisRateLimitStore:95`, design doc §4 |
 | 13 | Allowed/rejected statistics | `ratelimit.requests` counter, tagged by outcome |
 | 14 | Redis failure handled | per-policy fail-open/closed, 503 on fail-closed |
-| 15 | Six required test classes | 86 tests across 10 classes — see §6 |
+| 15 | Six required test classes | 88 tests across 10 classes — see §6 |
 | 16 | Eight documentation topics | design doc 15 sections + README + 3 report formats |
 
 **Sample limits match the brief exactly:** `GET /api/products` 100/min/IP,

@@ -111,6 +111,63 @@ class RedisRateLimitStoreTest {
     }
 
     @Test
+    void batchDenialChargesNothing() {
+        var first = policy("batch-first", 2, Duration.ofMinutes(1));
+        var second = policy("batch-second", 1, Duration.ofMinutes(1));
+        var charges = java.util.List.of(
+                new RateLimitStore.Charge(first, "IP", "10.0.0.11"),
+                new RateLimitStore.Charge(second, "IP", "10.0.0.11"));
+
+        var allowed = store.consumeAll(charges, T0);
+        assertThat(allowed.allowed()).isTrue();
+        assertThat(allowed.blockedIndex()).isEqualTo(-1);
+
+        var denied = store.consumeAll(charges, T0);
+        assertThat(denied.allowed()).isFalse();
+        assertThat(denied.blockedIndex()).as("the exhausted second policy blocks").isEqualTo(1);
+        assertThat(denied.decision().retryAfter().isZero()).isFalse();
+
+        // Exact totals per policy: the denial left both counters exactly where the allowed batch put them.
+        assertThat(redis.opsForValue().get(store.keyFor(first, "IP", "10.0.0.11", T0))).isEqualTo("1");
+        assertThat(redis.opsForValue().get(store.keyFor(second, "IP", "10.0.0.11", T0))).isEqualTo("1");
+    }
+
+    @Test
+    void concurrentBatchesForLastUnitAllowExactlyOne() throws Exception {
+        var first = policy("race-first", 2, Duration.ofMinutes(1));
+        var second = policy("race-second", 2, Duration.ofMinutes(1));
+        var charges = java.util.List.of(
+                new RateLimitStore.Charge(first, "IP", "10.0.0.12"),
+                new RateLimitStore.Charge(second, "IP", "10.0.0.12"));
+        assertThat(store.consumeAll(charges, T0).allowed()).isTrue();
+
+        int threads = 2;
+        var startLine = new java.util.concurrent.CyclicBarrier(threads);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var tasks = new java.util.ArrayList<java.util.concurrent.Callable<Boolean>>();
+        for (int i = 0; i < threads; i++) {
+            tasks.add(() -> {
+                startLine.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                return store.consumeAll(charges, T0).allowed();
+            });
+        }
+        int allowed = 0;
+        try {
+            for (var f : pool.invokeAll(tasks)) {
+                if (f.get(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                    allowed++;
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(allowed).as("exactly one racer may take the last unit").isEqualTo(1);
+        assertThat(redis.opsForValue().get(store.keyFor(first, "IP", "10.0.0.12", T0))).isEqualTo("2");
+        assertThat(redis.opsForValue().get(store.keyFor(second, "IP", "10.0.0.12", T0))).isEqualTo("2");
+    }
+
+    @Test
     void twoStoreInstancesShareOneLimit() {
         // Simulates two application instances against one Redis: separate objects, separate
         // connections, identical enforcement.

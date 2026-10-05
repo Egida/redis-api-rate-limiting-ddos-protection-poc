@@ -18,11 +18,10 @@ import org.springframework.stereotype.Component;
  * managed path would mean two implementations to keep correct. The managed store only decides
  * <em>which</em> policies apply and with what identity; the store still decides whether to allow.
  *
- * <p><strong>Composition is preflight-then-commit.</strong> Every applicable policy is peeked without
- * spending quota; only if all peeks allow are the policies consumed. A preflight denial therefore leaves
- * earlier policies uncharged. The remaining race is between a successful preflight and the commit: a
- * concurrent request can take the last unit first, so the commit may reject after earlier commits have
- * already incremented. That bias is toward rejecting, never toward over-admitting.
+ * <p><strong>Composition is one atomic batch.</strong> The enforcer hands every applicable policy to
+ * the store in a single {@code consumeAll} call. The Redis implementation inspects all counters inside
+ * one Lua script before incrementing any of them, so a denial charges nothing anywhere — rejected
+ * attempts are recorded only as metrics, never as quota. There is no check/commit window left to race.
  */
 @Component
 public class PolicyEnforcer {
@@ -117,12 +116,11 @@ public class PolicyEnforcer {
     }
 
     /**
-     * Evaluates already-resolved policies.
+     * Evaluates already-resolved policies in one atomic batch.
      *
-     * <p>Preflight first: every policy is peeked without charging. If any peek denies, nothing has been
-     * consumed and that denial is returned. Only when all peeks allow are the policies committed in
-     * order. A commit can still reject if a concurrent request spent the last unit after the preflight;
-     * that race is safe but not free, and it is documented rather than hidden.
+     * <p>The store decides and charges every policy inside a single Redis-side operation, so a denial
+     * never leaves earlier policies charged. The only store that cannot do better is one using the
+     * interface default, which falls back to sequential peek-then-commit.
      */
     public Composition enforceResolved(List<ResolvedPolicy> resolved, long nowMillis) {
         if (resolved.isEmpty()) {
@@ -130,29 +128,18 @@ public class PolicyEnforcer {
         }
 
         List<PolicyDocument> consulted = resolved.stream().map(ResolvedPolicy::policy).toList();
+        var charges = new ArrayList<RateLimitStore.Charge>(resolved.size());
         for (ResolvedPolicy candidate : resolved) {
-            RateLimitDecision preflight = store.peek(asStorePolicy(candidate.policy()),
-                    candidate.identityType(), candidate.identityValue(), nowMillis);
-            if (!preflight.allowed()) {
-                return new Composition(consulted, candidate.policy(), preflight);
-            }
+            charges.add(new RateLimitStore.Charge(asStorePolicy(candidate.policy()),
+                    candidate.identityType(), candidate.identityValue()));
         }
-
-        RateLimitDecision governing = null;
-        for (ResolvedPolicy candidate : resolved) {
-            RateLimitDecision decision = store.consume(asStorePolicy(candidate.policy()),
-                    candidate.identityType(), candidate.identityValue(), nowMillis);
-            if (governing == null) {
-                // Most specific policy first, so this is the one whose limit headers the client sees.
-                governing = decision;
-            }
-            if (!decision.allowed()) {
-                return new Composition(consulted, candidate.policy(), decision);
-            }
+        RateLimitStore.BatchDecision batch = store.consumeAll(charges, nowMillis);
+        if (!batch.allowed()) {
+            return new Composition(consulted, consulted.get(batch.blockedIndex()), batch.decision());
         }
         // Allowed. The decision carries the governing policy's limit and remaining count, which the
         // filter publishes as X-RateLimit-Limit / X-RateLimit-Remaining.
-        return new Composition(consulted, null, governing);
+        return new Composition(consulted, null, batch.decision());
     }
 
     /**
