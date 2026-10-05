@@ -46,6 +46,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
     private final PolicyEnforcer enforcer;
     private final RateLimitIdentityResolver identities;
+    private final com.example.ratelimit.policy.ApiKeyRegistry apiKeys;
     private final RateLimitMetrics metrics;
     private final RateLimitProperties properties;
     private final ObjectMapper mapper;
@@ -53,9 +54,11 @@ public class RateLimitFilter extends OncePerRequestFilter {
     private final AntPathMatcher matcher = new AntPathMatcher();
 
     public RateLimitFilter(PolicyEnforcer enforcer, RateLimitIdentityResolver identities,
-            RateLimitMetrics metrics, RateLimitProperties properties, ObjectMapper mapper, Clock clock) {
+            com.example.ratelimit.policy.ApiKeyRegistry apiKeys, RateLimitMetrics metrics,
+            RateLimitProperties properties, ObjectMapper mapper, Clock clock) {
         this.enforcer = enforcer;
         this.identities = identities;
+        this.apiKeys = apiKeys;
         this.metrics = metrics;
         this.properties = properties;
         this.mapper = mapper;
@@ -106,6 +109,16 @@ public class RateLimitFilter extends OncePerRequestFilter {
         for (PolicyDocument policy : applicable) {
             if (policy.scope() == Scope.GLOBAL) {
                 resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, Scope.GLOBAL.name(), "global"));
+            } else if (policy.scope() == Scope.API_KEY) {
+                var key = apiKeys.resolve(request.getHeader("X-API-Key"));
+                if (key.isEmpty()) {
+                    // Not a rate decision at all: without a valid key there is no identity to charge.
+                    metrics.record(RateLimitMetrics.Outcome.ERROR, policy.id(), "apikey");
+                    writeUnauthorized(response, request, policy);
+                    return;
+                }
+                resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, Scope.API_KEY.name(),
+                        key.get().keyId()));
             } else {
                 Identity identity = identities.resolve(request, enforcer.storePolicy(policy));
                 resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, identity.type(), identity.value()));
@@ -142,7 +155,21 @@ public class RateLimitFilter extends OncePerRequestFilter {
                 response.setHeader("X-RateLimit-Policies",
                         composition.consulted().stream().map(PolicyDocument::id).toList().toString());
             }
-            chain.doFilter(request, response);
+            if (composition.leases().isEmpty()) {
+                chain.doFilter(request, response);
+                return;
+            }
+            // Concurrency permits are held for the whole request and released afterwards, so in-flight
+            // work is what is capped rather than request starts.
+            try {
+                chain.doFilter(request, response);
+            } finally {
+                if (request.isAsyncStarted()) {
+                    request.getAsyncContext().addListener(new ReleaseOnAsyncDone(resolved, composition));
+                } else {
+                    releaseLeases(resolved, composition);
+                }
+            }
             return;
         }
 
@@ -158,6 +185,52 @@ public class RateLimitFilter extends OncePerRequestFilter {
             }
         }
         return RateLimitProperties.Identity.IP.name();
+    }
+
+    private void releaseLeases(List<PolicyEnforcer.ResolvedPolicy> resolved,
+            PolicyEnforcer.Composition composition) {
+        for (var entry : composition.leases().entrySet()) {
+            resolved.stream()
+                    .filter(r -> r.policy().id().equals(entry.getKey()))
+                    .findFirst()
+                    .ifPresent(r -> enforcer.release(r, entry.getValue()));
+        }
+    }
+
+    /**
+     * Releases concurrency permits when the servlet container finishes async processing. Without
+     * this, a permit would be released when the initial filter call returns while the request is
+     * still running, and the cap would stop meaning anything on async routes.
+     */
+    private final class ReleaseOnAsyncDone implements jakarta.servlet.AsyncListener {
+        private final List<PolicyEnforcer.ResolvedPolicy> resolved;
+        private final PolicyEnforcer.Composition composition;
+
+        ReleaseOnAsyncDone(List<PolicyEnforcer.ResolvedPolicy> resolved,
+                PolicyEnforcer.Composition composition) {
+            this.resolved = resolved;
+            this.composition = composition;
+        }
+
+        @Override
+        public void onComplete(jakarta.servlet.AsyncEvent event) {
+            releaseLeases(resolved, composition);
+        }
+
+        @Override
+        public void onTimeout(jakarta.servlet.AsyncEvent event) {
+            releaseLeases(resolved, composition);
+        }
+
+        @Override
+        public void onError(jakarta.servlet.AsyncEvent event) {
+            releaseLeases(resolved, composition);
+        }
+
+        @Override
+        public void onStartAsync(jakarta.servlet.AsyncEvent event) {
+            event.getAsyncContext().addListener(this);
+        }
     }
 
     private void writeRateLimited(HttpServletResponse response, HttpServletRequest request, PolicyDocument policy,
@@ -185,6 +258,21 @@ public class RateLimitFilter extends OncePerRequestFilter {
         body.put("consultedPolicies",
                 composition.consulted().stream().map(PolicyDocument::id).toList());
         mapper.writeValue(response.getOutputStream(), body);
+    }
+
+    /** No valid API key was presented, so there is no identity to rate-limit: 401, not 429. */
+    private void writeUnauthorized(HttpServletResponse response, HttpServletRequest request,
+            PolicyDocument policy) throws IOException {
+        response.setStatus(HttpStatus.UNAUTHORIZED.value());
+        response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        response.setHeader("X-RateLimit-Policy", policy.id());
+        mapper.writeValue(response.getOutputStream(), Map.of(
+                "timestamp", Instant.now(clock).toString(),
+                "status", HttpStatus.UNAUTHORIZED.value(),
+                "error", HttpStatus.UNAUTHORIZED.getReasonPhrase(),
+                "message", "A valid X-API-Key header is required for this route.",
+                "path", request.getRequestURI(),
+                "policy", policy.id()));
     }
 
     /** No quota was counted, so no X-RateLimit-Limit/Remaining headers are emitted here. */

@@ -3,10 +3,9 @@ package com.example.ratelimit.policy;
 /**
  * Rate-limiting algorithms selectable per policy.
  *
- * <p>Only {@link #FIXED_WINDOW} is wired to an enforcing strategy in this phase. The remaining
- * constants exist so the admin contract and the stored documents are forward-compatible, but
- * {@link #isImplemented()} is deliberately false for them and the admin API rejects a save that
- * selects one. That is the honest state: an enum value is not an implementation.
+ * <p>Every constant below is wired to the atomic batch in {@code RedisRateLimitStore}: saving a policy
+ * that selects one means it is enforced. The capabilities endpoint reports the same set, so the admin
+ * UI can never offer more — or less — than the backend does.
  */
 public enum Algorithm {
 
@@ -14,19 +13,19 @@ public enum Algorithm {
     FIXED_WINDOW(true),
 
     /** Rolling log of timestamps in a sorted set. Exact but memory grows with request rate. */
-    SLIDING_WINDOW(false),
+    SLIDING_WINDOW(true),
 
     /** Weighted current + previous window counters. Approximate; documented as such. */
-    SLIDING_WINDOW_COUNTER(false),
+    SLIDING_WINDOW_COUNTER(true),
 
     /** Capacity plus refill rate. Allows a burst of {@code capacity} then a sustained rate. */
-    TOKEN_BUCKET(false),
+    TOKEN_BUCKET(true),
 
     /** Queued shaping at a fixed drain rate. */
-    LEAKY_BUCKET(false),
+    LEAKY_BUCKET(true),
 
     /** Caps in-flight requests, independent of any time window. */
-    CONCURRENCY_LIMIT(false);
+    CONCURRENCY_LIMIT(true);
 
     private final boolean implemented;
 

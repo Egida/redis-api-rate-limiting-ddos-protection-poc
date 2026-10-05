@@ -8,6 +8,7 @@ import {
 } from '../../core/admin-api.service';
 import {
   AdminPolicy,
+  ApiKeyMetadata,
   AuditRecord,
   Capabilities,
   durationToSeconds,
@@ -52,6 +53,7 @@ export class AdminPoliciesComponent {
   readonly capabilities = signal<Capabilities | null>(null);
   readonly policies = signal<AdminPolicy[]>([]);
   readonly audit = signal<AuditRecord[]>([]);
+  readonly apiKeys = signal<ApiKeyMetadata[]>([]);
   readonly loadError = signal<string | null>(null);
 
   readonly mode = signal<EditorMode>('list');
@@ -69,9 +71,23 @@ export class AdminPoliciesComponent {
   readonly fScope = signal('IP');
   readonly fWindowSeconds = signal(60);
   readonly fLimit = signal(100);
+  readonly fCapacity = signal(100);
+  readonly fRefillSeconds = signal(10);
+  readonly fCost = signal(1);
+  readonly fDrainRate = signal(10);
+  readonly fQueueCapacity = signal(20);
+  readonly fMaxConcurrent = signal(10);
+  readonly fLeaseSeconds = signal(30);
   readonly fEnabled = signal(true);
   readonly fFailureMode = signal('' as '' | 'FAIL_OPEN' | 'FAIL_CLOSED');
   readonly fVersion = signal(1);
+
+  // API-key management. The raw secret is shown exactly once after creation.
+  readonly keyOwner = signal('');
+  readonly keyTier = signal('standard');
+  readonly newRawKey = signal<string | null>(null);
+  readonly confirmRevokeId = signal<string | null>(null);
+  readonly keysError = signal<string | null>(null);
 
   // Bounded probe state.
   readonly probePolicyId = signal<string | null>(null);
@@ -122,24 +138,28 @@ export class AdminPoliciesComponent {
     this.capabilities.set(null);
     this.policies.set([]);
     this.audit.set([]);
+    this.apiKeys.set([]);
+    this.newRawKey.set(null);
     this.mode.set('list');
   }
 
   async reloadAll(): Promise<void> {
     this.loadError.set(null);
-    const [caps, list, audit] = await Promise.all([
+    const [caps, list, audit, keys] = await Promise.all([
       firstValueFrom(this.api.capabilities()),
       firstValueFrom(this.api.list()),
       firstValueFrom(this.api.audit(50)),
+      firstValueFrom(this.api.listKeys()),
     ]);
-    if (isAdminError(caps) || isAdminError(list) || isAdminError(audit)) {
-      const first = [caps, list, audit].find(isAdminError);
-      this.loadError.set(first && isAdminError(first) ? first.message : 'Load failed.');
+    const failed = [caps, list, audit, keys].find(isAdminError);
+    if (failed && isAdminError(failed)) {
+      this.loadError.set(failed.message);
       return;
     }
-    this.capabilities.set(caps);
-    this.policies.set(list);
-    this.audit.set(audit);
+    if (!isAdminError(caps)) this.capabilities.set(caps);
+    if (!isAdminError(list)) this.policies.set(list);
+    if (!isAdminError(audit)) this.audit.set(audit);
+    if (!isAdminError(keys)) this.apiKeys.set(keys);
   }
 
   onCreate(): void {
@@ -155,6 +175,13 @@ export class AdminPoliciesComponent {
     this.fScope.set('IP');
     this.fWindowSeconds.set(60);
     this.fLimit.set(100);
+    this.fCapacity.set(100);
+    this.fRefillSeconds.set(10);
+    this.fCost.set(1);
+    this.fDrainRate.set(10);
+    this.fQueueCapacity.set(20);
+    this.fMaxConcurrent.set(10);
+    this.fLeaseSeconds.set(30);
     this.fEnabled.set(true);
     this.fFailureMode.set('');
     this.fVersion.set(1);
@@ -173,6 +200,13 @@ export class AdminPoliciesComponent {
     this.fScope.set(policy.scope);
     this.fWindowSeconds.set(durationToSeconds(policy.window) ?? 60);
     this.fLimit.set(policy.limit ?? 100);
+    this.fCapacity.set(policy.capacity ?? 100);
+    this.fRefillSeconds.set(durationToSeconds(policy.refillInterval) ?? 10);
+    this.fCost.set(policy.cost ?? 1);
+    this.fDrainRate.set(policy.drainRate ?? 10);
+    this.fQueueCapacity.set(policy.queueCapacity ?? 20);
+    this.fMaxConcurrent.set(policy.maxConcurrent ?? 10);
+    this.fLeaseSeconds.set(durationToSeconds(policy.leaseDuration) ?? 30);
     this.fEnabled.set(policy.enabled);
     this.fFailureMode.set(policy.onRedisError ?? '');
     this.fVersion.set(policy.version);
@@ -203,6 +237,13 @@ export class AdminPoliciesComponent {
       scope: this.fScope(),
       window: secondsToDuration(this.fWindowSeconds()),
       limit: this.fLimit(),
+      capacity: this.fCapacity(),
+      refillInterval: secondsToDuration(this.fRefillSeconds()),
+      cost: this.fCost(),
+      drainRate: this.fDrainRate(),
+      queueCapacity: this.fQueueCapacity(),
+      maxConcurrent: this.fMaxConcurrent(),
+      leaseDuration: secondsToDuration(this.fLeaseSeconds()),
       enabled: this.fEnabled(),
       onRedisError: (failureMode === '' ? null : failureMode) as 'FAIL_OPEN' | 'FAIL_CLOSED' | null,
       version: this.mode() === 'edit' ? this.fVersion() : undefined,
@@ -306,8 +347,27 @@ export class AdminPoliciesComponent {
     if (this.fScope() !== 'GLOBAL' && !this.fPath().trim().startsWith('/')) {
       problems.push('Path must start with / (only a GLOBAL policy omits it).');
     }
-    if (!Number.isInteger(this.fLimit()) || this.fLimit() < 1) {
-      problems.push('Limit must be a whole number of at least 1.');
+    const positiveInt = (value: number, label: string) => {
+      if (!Number.isInteger(value) || value < 1) problems.push(`${label} must be a whole number of at least 1.`);
+    };
+    switch (this.fAlgorithm()) {
+      case 'TOKEN_BUCKET':
+        positiveInt(this.fCapacity(), 'Capacity');
+        positiveInt(this.fRefillSeconds(), 'Refill interval');
+        positiveInt(this.fCost(), 'Cost');
+        break;
+      case 'LEAKY_BUCKET':
+        positiveInt(this.fDrainRate(), 'Drain rate');
+        positiveInt(this.fQueueCapacity(), 'Queue capacity');
+        break;
+      case 'CONCURRENCY_LIMIT':
+        positiveInt(this.fMaxConcurrent(), 'Max concurrent');
+        positiveInt(this.fLeaseSeconds(), 'Lease duration');
+        break;
+      default:
+        positiveInt(this.fLimit(), 'Limit');
+        positiveInt(this.fWindowSeconds(), 'Window');
+        break;
     }
     if (!Number.isInteger(this.fWindowSeconds()) || this.fWindowSeconds() < 1) {
       problems.push('Window must be at least 1 second.');
@@ -317,6 +377,53 @@ export class AdminPoliciesComponent {
       problems.push(`${this.fAlgorithm()} is not enforced by this build and cannot be saved as working.`);
     }
     return problems;
+  }
+
+  readonly selectedAlgoNote = computed(() => {
+    const algo = this.capabilities()?.algorithms.find((a) => a.name === this.fAlgorithm());
+    return algo?.note ?? null;
+  });
+
+  async onCreateKey(): Promise<void> {
+    this.keysError.set(null);
+    this.newRawKey.set(null);
+    if (!this.keyOwner().trim()) {
+      this.keysError.set('Owner is required.');
+      return;
+    }
+    this.busy.set(true);
+    try {
+      const result = await firstValueFrom(this.api.createKey(this.keyOwner().trim(), this.keyTier().trim() || 'standard'));
+      if (isAdminError(result)) {
+        this.keysError.set(result.message);
+        return;
+      }
+      this.newRawKey.set(result.key);
+      this.keyOwner.set('');
+      await this.reloadAll();
+    } finally {
+      this.busy.set(false);
+    }
+  }
+
+  async onRevokeKey(keyId: string): Promise<void> {
+    if (this.confirmRevokeId() !== keyId) {
+      this.confirmRevokeId.set(keyId);
+      return;
+    }
+    this.confirmRevokeId.set(null);
+    this.keysError.set(null);
+    this.busy.set(true);
+    try {
+      const result = await firstValueFrom(this.api.revokeKey(keyId));
+      if (isAdminError(result)) {
+        this.keysError.set(result.message);
+        return;
+      }
+      await this.reloadAll();
+    } finally {
+      this.busy.set(false);
+    }
   }
 
   private describeLoginFailure(status: number, message: string): string {

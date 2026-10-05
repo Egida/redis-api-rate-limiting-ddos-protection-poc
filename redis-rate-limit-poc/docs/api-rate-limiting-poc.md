@@ -606,8 +606,9 @@ duplicated key-format string in `RedisRateLimitStore`, an unused logger, and the
 
 **Known limitations of this POC**
 
-1. Fixed window allows up to 2× the limit across a window boundary. Use a sliding window or token
-   bucket if that matters for the route.
+1. Fixed window allows up to 2× the limit across a window boundary. Prefer the exact sliding
+   window or token bucket policies for routes where that matters; all three are enforceable per
+   policy from the admin API.
 2. `Retry-After` comes from the live TTL and can exceed the true window end by up to `ttl-grace`;
    this errs toward over-caution, the safe direction.
 3. Behind an unlisted load balancer every request appears to come from the LB and shares one quota.
@@ -617,9 +618,9 @@ duplicated key-format string in `RedisRateLimitStore`, an unused logger, and the
    client's and resolution may fall back to the proxy address (over-restrictive, not bypass-prone).
    The scanner never trusts a value left of the first untrusted hop, so the failure mode is shared
    quota rather than unlimited keys.
-4. The counter records rejected attempts too, so a client hammering a blocked route keeps the count
-   climbing (it is clamped to `remaining = 0`). Fine for the same window, but it means the key for a
-   hostile client stays hot.
+4. Since the atomic multi-policy batch, a denied request charges nothing: the counter holds
+   exactly the allowed requests. Rejected attempts are visible in
+   `ratelimit.requests{outcome=rejected}` and the access log, not in the quota counter.
 5. Demo credentials (`alice`/`bob`) are in-memory with plain HTTP Basic. POC only.
 6. No rate-limit rules for WebSocket, gRPC or non-HTTP ingress; this covers the servlet HTTP stack.
 7. Redis is a single point here — no Sentinel or Cluster configuration is included.
@@ -658,16 +659,22 @@ redis-rate-limit-poc/
   docs/api-rate-limiting-poc.md this document
   scripts/load-demo.ps1         sequential load against one instance
   scripts/two-instance-demo.ps1 two JVMs, one Redis
+  scripts/admin-cross-instance-demo.ps1  admin edit on JVM A enforced by JVM B, no restarts
+  scripts/concurrency-demo.ps1           global concurrency cap across two JVMs
   scripts/verify-all.ps1        build + tests + both demos, per-step timing and hard timeouts
   scripts/lib/timing.ps1        stopwatch, polling and alert helpers used by the scripts
   ../frontend/                  standalone Angular console (dev server 4200, proxy -> 8080)
     proxy.conf.json
-    src/app/core/               API client, dashboard aggregation, demo request + runner services
-    src/app/features/           dashboard page, request demo
+    src/app/core/               API client, dashboard aggregation, demo request + runner services,
+                                admin API client and models
+    src/app/features/           dashboard page, request demo, admin policies
   src/main/java/com/example/ratelimit/
     RateLimitPocApplication.java
-    config/    RateLimitProperties, RateLimitConfiguration
-    ratelimit/ policy resolver, identity resolver, store, Redis store, filter, metrics, decision
+    config/    RateLimitProperties, RateLimitConfiguration, AdminProperties
+    ratelimit/ policy resolver, identity resolver, store, Redis store (all algorithms), filter,
+               metrics, decision
+    policy/    documents, Redis-backed store, atomic batch enforcer, seeder, API-key registry
+    admin/     policy and key administration REST API
     web/       DemoController, SecurityConfig, PocMetadataController (read-only policy metadata)
   src/main/resources/application.yml
   src/test/java/com/example/ratelimit/
@@ -678,3 +685,34 @@ redis-rate-limit-poc/
     web/        PocMetadataControllerTest
   src/test/resources/rate-limit-test-windows.properties
 ```
+
+## 16. Enforced algorithms, namespaces, and key management
+
+Every policy selects one algorithm, enforced by a single Lua batch (`BATCH` in
+`RedisRateLimitStore.java`) that inspects all applicable counters before charging any of them.
+Time comes from Redis `TIME`, so JVM clocks never disagree. Parameters arrive as one JSON object
+per policy, decoded with `cjson`.
+
+| Algorithm | State | Decision | Retry |
+|---|---|---|---|
+| Fixed window | Counter, original `rate-limit:v1:*` layout | `count >= limit` denies | live TTL |
+| Exact sliding window | Sorted set `rl:v2:sw:*`, expired members trimmed per decision, TTL refreshed | events in trailing window `>= limit` denies | oldest event expiry |
+| Sliding-window counter | Current + previous counters `rl:v2:sc:*:w{index}` | `current + previous × (1 − elapsed/window) >= limit` denies; approximate | window end |
+| Token bucket | Hash `{tok, ts}` at `rl:v2:tb:*`, refilled on read, expired when idle | balance `< cost` denies | time to afford cost |
+| Leaky bucket (policing) | Depth counter `rl:v2:lb:*`, TTL = drain horizon | depth `>= queueCapacity` denies | drain horizon TTL |
+| Concurrency limit | Set of lease ids `rl:v2:cc:*`, TTL = lease | held `>= maxConcurrent` denies | lease TTL |
+
+Namespaces: `rate-limit:v1:*` (fixed counters), `rl:v2:{sw,sc,tb,lb,cc}:*` (algorithm state),
+`ratelimit:policy:v1:*` (policy documents, audit, seed marker), `ratelimit:apikey:v1:*` (key
+digests). No raw identity, key, or secret appears in any key, log, metric label, or screenshot.
+
+API keys (`ApiKeyRegistry`): `rg_`-prefixed random secrets, SHA-256 stored, raw shown once at
+creation. `API_KEY` policies resolve `X-API-Key` to owner/tier; unknown or revoked keys get 401,
+never 429. Tier is administrative metadata; per-tier rates are separate policies.
+
+Concurrency leases are acquired in the batch and released in `finally` after the request completes
+(an async listener covers async dispatches). Saturation is 429 with the blocking policy id,
+consistent with every other denial. `GET /api/work?ms=` sleeps while holding a permit and reports
+per-JVM overlap for the two-JVM proof (`scripts/concurrency-demo.ps1`: 12 near-simultaneous slow
+requests across two JVMs, exactly 4×200 + 8×429 for a 4-permit global cap, then a solo request
+proving release).

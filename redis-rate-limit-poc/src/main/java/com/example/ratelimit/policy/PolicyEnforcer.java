@@ -34,7 +34,9 @@ public class PolicyEnforcer {
     public record Composition(
             List<PolicyDocument> consulted,
             PolicyDocument blockedBy,
-            RateLimitDecision decision) {
+            RateLimitDecision decision,
+            /** Policy id to lease id for concurrency permits this evaluation acquired. */
+            java.util.Map<String, String> leases) {
 
         public boolean allowed() {
             return blockedBy == null;
@@ -124,41 +126,39 @@ public class PolicyEnforcer {
      */
     public Composition enforceResolved(List<ResolvedPolicy> resolved, long nowMillis) {
         if (resolved.isEmpty()) {
-            return new Composition(List.of(), null, null);
+            return new Composition(List.of(), null, null, java.util.Map.of());
         }
 
         List<PolicyDocument> consulted = resolved.stream().map(ResolvedPolicy::policy).toList();
         var charges = new ArrayList<RateLimitStore.Charge>(resolved.size());
         for (ResolvedPolicy candidate : resolved) {
-            charges.add(new RateLimitStore.Charge(asStorePolicy(candidate.policy()),
-                    candidate.identityType(), candidate.identityValue()));
+            charges.add(new RateLimitStore.Charge(candidate.policy(), candidate.identityType(),
+                    candidate.identityValue()));
         }
         RateLimitStore.BatchDecision batch = store.consumeAll(charges, nowMillis);
         if (!batch.allowed()) {
-            return new Composition(consulted, consulted.get(batch.blockedIndex()), batch.decision());
+            return new Composition(consulted, consulted.get(batch.blockedIndex()), batch.decision(),
+                    java.util.Map.of());
         }
         // Allowed. The decision carries the governing policy's limit and remaining count, which the
         // filter publishes as X-RateLimit-Limit / X-RateLimit-Remaining.
-        return new Composition(consulted, null, batch.decision());
+        return new Composition(consulted, null, batch.decision(), batch.leases());
     }
 
     /**
-     * Projects a managed policy onto the record the existing store understands.
+     * Projects a managed policy onto the record the identity resolver understands.
      *
-     * <p>Only {@link Algorithm#FIXED_WINDOW} can appear here: {@link PolicyDocument#validate()} refuses
-     * to store a policy selecting an unimplemented algorithm, so reaching this method with anything else
-     * would mean the store was written to directly, bypassing the admin API.
+     * <p>Only the scope mapping matters here; the resolver never reads limits or windows, so this
+     * works for every algorithm, unlike the fixed-window store projection.
      */
     private static RateLimitProperties.Policy asStorePolicy(PolicyDocument policy) {
-        if (policy.algorithm() != Algorithm.FIXED_WINDOW) {
-            throw new IllegalStateException("policy " + policy.id() + " selects " + policy.algorithm()
-                    + ", which has no enforcing strategy in this phase");
-        }
         RateLimitProperties.Identity identity = policy.scope() == Scope.USER
                 ? RateLimitProperties.Identity.USER
                 : RateLimitProperties.Identity.IP;
         return new RateLimitProperties.Policy(policy.id(), policy.method(), policy.path(),
-                policy.limit(), policy.window(), identity, policy.onRedisError());
+                policy.limit() == null ? 0 : policy.limit(),
+                policy.window() == null ? java.time.Duration.ofSeconds(1) : policy.window(), identity,
+                policy.onRedisError());
     }
 
     /** Projects a managed policy for the identity resolver. */
@@ -168,5 +168,14 @@ public class PolicyEnforcer {
 
     public RateLimitProperties.FailureMode failureModeFor(PolicyDocument policy) {
         return policy.onRedisError() != null ? policy.onRedisError() : globalFailureMode;
+    }
+
+    /**
+     * Releases one concurrency lease. Called after the request completes, in a finally block for
+     * normal requests and from an async listener when the servlet container takes over the lifecycle.
+     */
+    public void release(ResolvedPolicy resolved, String leaseId) {
+        store.releaseConcurrency(resolved.policy(), resolved.identityType(), resolved.identityValue(),
+                leaseId);
     }
 }

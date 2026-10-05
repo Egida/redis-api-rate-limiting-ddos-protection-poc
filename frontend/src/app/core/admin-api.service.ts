@@ -6,6 +6,8 @@ import { API_CONFIG } from './api-config';
 import {
   AdminApiError,
   AdminPolicy,
+  ApiKeyCreated,
+  ApiKeyMetadata,
   AuditRecord,
   Capabilities,
   PolicyEdit,
@@ -92,6 +94,20 @@ export class AdminApiService {
 
   audit(limit = 50): Observable<AuditRecord[] | AdminApiError> {
     return this.authed<AuditRecord[]>('GET', `/audit?limit=${limit}`);
+  }
+
+  createKey(owner: string, tier: string): Observable<ApiKeyCreated | AdminApiError> {
+    return this.authed<ApiKeyCreated>('POST', '/keys', { owner, tier });
+  }
+
+  listKeys(): Observable<ApiKeyMetadata[] | AdminApiError> {
+    return this.authed<ApiKeyMetadata[]>('GET', '/keys');
+  }
+
+  revokeKey(keyId: string): Observable<{ revoked: true } | AdminApiError> {
+    return this.authed<void>('DELETE', `/keys/${encodeURIComponent(keyId)}`).pipe(
+      map((result) => (isAdminError(result) ? result : { revoked: true as const })),
+    );
   }
 
   private authed<T>(method: string, path: string, body?: unknown): Observable<T | AdminApiError> {

@@ -143,14 +143,52 @@
           A request must pass <strong>every</strong> policy that matches it: route, user, IP and
           global rules combine with AND, and a denial charges nothing.
         </p>
-        <label>
-          Window (seconds)
-          <input type="number" name="f-window" [ngModel]="fWindowSeconds()" (ngModelChange)="fWindowSeconds.set($event)" min="1" required />
-        </label>
-        <label>
-          Limit per window
-          <input type="number" name="f-limit" [ngModel]="fLimit()" (ngModelChange)="fLimit.set($event)" min="1" required />
-        </label>
+        @if (selectedAlgoNote()) {
+          <p class="hint">{{ selectedAlgoNote() }}</p>
+        }
+        @if (fAlgorithm() === 'TOKEN_BUCKET') {
+          <label>
+            Bucket capacity (burst size in tokens)
+            <input type="number" name="f-capacity" [ngModel]="fCapacity()" (ngModelChange)="fCapacity.set($event)" min="1" required />
+          </label>
+          <label>
+            Refill interval (seconds to refill an empty bucket)
+            <input type="number" name="f-refill" [ngModel]="fRefillSeconds()" (ngModelChange)="fRefillSeconds.set($event)" min="1" required />
+          </label>
+          <label>
+            Cost (tokens per request)
+            <input type="number" name="f-cost" [ngModel]="fCost()" (ngModelChange)="fCost.set($event)" min="1" required />
+          </label>
+        } @else if (fAlgorithm() === 'LEAKY_BUCKET') {
+          <label>
+            Drain rate (requests per second)
+            <input type="number" name="f-drain" [ngModel]="fDrainRate()" (ngModelChange)="fDrainRate.set($event)" min="1" required />
+          </label>
+          <label>
+            Queue capacity (burst depth before overflow rejects)
+            <input type="number" name="f-queue" [ngModel]="fQueueCapacity()" (ngModelChange)="fQueueCapacity.set($event)" min="1" required />
+          </label>
+          <p class="hint">Policing mode: overflow is rejected, never queued. No request waits.</p>
+        } @else if (fAlgorithm() === 'CONCURRENCY_LIMIT') {
+          <label>
+            Max concurrent (permits shared across instances)
+            <input type="number" name="f-maxconc" [ngModel]="fMaxConcurrent()" (ngModelChange)="fMaxConcurrent.set($event)" min="1" required />
+          </label>
+          <label>
+            Lease duration (seconds; maximum request duration)
+            <input type="number" name="f-lease" [ngModel]="fLeaseSeconds()" (ngModelChange)="fLeaseSeconds.set($event)" min="1" required />
+          </label>
+          <p class="hint">Permits release when the request completes. A request running longer than the lease may lose its permit.</p>
+        } @else {
+          <label>
+            Window (seconds)
+            <input type="number" name="f-window" [ngModel]="fWindowSeconds()" (ngModelChange)="fWindowSeconds.set($event)" min="1" required />
+          </label>
+          <label>
+            Limit per window
+            <input type="number" name="f-limit" [ngModel]="fLimit()" (ngModelChange)="fLimit.set($event)" min="1" required />
+          </label>
+        }
         <label class="check">
           <input type="checkbox" name="f-enabled" [ngModel]="fEnabled()" (ngModelChange)="fEnabled.set($event)" />
           Enabled
@@ -207,8 +245,64 @@
       </section>
     }
 
-    <h3>Audit history</h3>
-    @if (audit().length === 0) {
+    <h3>API keys</h3>
+    <p class="hint">
+      Keys are validated server-side against digests; raw secrets are never stored. A key is shown
+      exactly once at creation — losing it means creating a new one. Send it as
+      <code>X-API-Key</code>.
+    </p>
+    @if (newRawKey(); as rawKey) {
+      <p class="info" role="status">
+        New key (copy it now, it will never be shown again): <code>{{ rawKey }}</code>
+        <button type="button" class="btn-secondary" (click)="newRawKey.set(null)">Dismiss</button>
+      </p>
+    }
+    @if (keysError()) {
+      <p class="error" role="alert">{{ keysError() }}</p>
+    }
+    <form class="editor" (ngSubmit)="onCreateKey()" aria-label="Issue API key">
+      <label>
+        Owner
+        <input type="text" name="key-owner" [ngModel]="keyOwner()" (ngModelChange)="keyOwner.set($event)" required />
+      </label>
+      <label>
+        Tier
+        <input type="text" name="key-tier" [ngModel]="keyTier()" (ngModelChange)="keyTier.set($event)" />
+      </label>
+      <p><button type="submit" class="btn-primary" [disabled]="busy()">Issue key</button></p>
+    </form>
+    @if (apiKeys().length === 0) {
+      <p class="empty">No API keys issued.</p>
+    } @else {
+      <table class="policy-table">
+        <thead>
+          <tr>
+            <th scope="col">Key ID</th>
+            <th scope="col">Owner</th>
+            <th scope="col">Tier</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (key of apiKeys(); track key.keyId) {
+            <tr>
+              <td><code>{{ key.keyId }}</code></td>
+              <td>{{ key.owner }}</td>
+              <td>{{ key.tier }}</td>
+              <td class="actions">
+                @if (confirmRevokeId() === key.keyId) {
+                  <button type="button" class="btn-danger" (click)="onRevokeKey(key.keyId)" [disabled]="busy()">Confirm revoke</button>
+                } @else {
+                  <button type="button" class="btn-secondary" (click)="onRevokeKey(key.keyId)">Revoke</button>
+                }
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+
+    <h3>Audit history</h3>    @if (audit().length === 0) {
       <p class="empty">No audit entries yet.</p>
     } @else {
       <table class="policy-table">

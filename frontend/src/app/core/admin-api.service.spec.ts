@@ -84,6 +84,31 @@ describe('AdminApiService', () => {
     http.expectNone(`${BASE}/policies`);
   });
 
+  it('issues a key once and revokes it', async () => {
+    await loginAsAdmin();
+    const created = firstValueFrom(api.createKey('owner-a', 'standard'));
+    http.expectOne(`${BASE}/keys`).flush({
+      keyId: 'abc12345',
+      owner: 'owner-a',
+      tier: 'standard',
+      enabled: true,
+      createdAt: '2026-01-01T00:00:00Z',
+      key: 'rg_secret-once',
+    });
+    expect(await created).toMatchObject({ keyId: 'abc12345', key: 'rg_secret-once' });
+
+    const keys = firstValueFrom(api.listKeys());
+    http.expectOne(`${BASE}/keys`).flush([
+      { keyId: 'abc12345', owner: 'owner-a', tier: 'standard', enabled: true },
+    ]);
+    const listed = await keys;
+    expect(JSON.stringify(listed)).not.toContain('rg_secret-once');
+
+    const revoked = firstValueFrom(api.revokeKey('abc12345'));
+    http.expectOne(`${BASE}/keys/abc12345`).flush(null);
+    expect(await revoked).toEqual({ revoked: true });
+  });
+
   async function loginAsAdmin(): Promise<void> {
     const login = firstValueFrom(api.login('admin', 'secret'));
     http.expectOne(`${BASE}/policies`).flush([]);

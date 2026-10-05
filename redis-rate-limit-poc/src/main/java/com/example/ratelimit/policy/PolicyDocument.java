@@ -93,8 +93,6 @@ public record PolicyDocument(
         }
         if (algorithm == null) {
             problems.add("algorithm is required");
-        } else if (!algorithm.isImplemented()) {
-            problems.add("algorithm " + algorithm + " is not implemented in this phase");
         }
         if (scope == null) {
             problems.add("scope is required");

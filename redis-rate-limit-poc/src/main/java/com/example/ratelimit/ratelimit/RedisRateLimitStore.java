@@ -51,44 +51,135 @@ public class RedisRateLimitStore implements RateLimitStore {
             """, List.class);
 
     /**
-     * Atomic multi-policy batch. KEYS[i] is a counter key; ARGV[(i-1)*2+1] its limit and
-     * ARGV[(i-1)*2+2] its TTL in millis.
+     * Atomic multi-algorithm batch. KEYS[i] is the state key for charge i; ARGV[i] is a JSON object
+     * with {algo, limit, windowMs, graceMs, capacity, refillMs, cost, drainRate, queueCap, maxConc,
+     * leaseMs, member}.
      *
-     * <p>Phase one reads every counter and returns early on the first exhausted policy, charging
-     * nothing. Phase two increments every counter only when all policies allow. Returns
-     * {@code {0, blockedIndex1Based, pttl}} on denial or {@code {1, c1, t1, c2, t2, ...}} on success.
+     * <p>Algorithm ids: 1 fixed window, 2 exact sliding log, 3 sliding-window counter, 4 token bucket,
+     * 5 leaky-bucket policing, 6 concurrency leases.
      *
-     * <p>Single Redis instance only. Under Redis Cluster the keys would have to share a hash slot
-     * (hash tags), because a script cannot span slots; this POC runs one Redis, so no tagging is
-     * applied and no cross-slot claim is made.
+     * <p>Phase one inspects every charge without spending quota and returns early on the first denial
+     * as {@code {0, blockedIndex1Based, retrySeconds, blockedLimit}}. Trimming already-expired
+     * sliding-log entries is the only phase-one write, and it cannot change any decision. Phase two
+     * applies every write only when all charges allow, returning {@code {1, govLimit, govRemaining}}.
+     *
+     * <p>Time comes from Redis TIME, so JVM clocks never disagree about windows, refills or retries.
+     *
+     * <p>Single Redis instance only. The keys of one batch would have to share a hash slot (hash tags)
+     * under Redis Cluster; this POC runs one Redis, so no tagging is applied and no cross-slot claim
+     * is made.
      */
     private static final RedisScript<List> BATCH = new DefaultRedisScript<>("""
+            local t = redis.call('TIME')
+            local nowms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
             local n = #KEYS
             for i = 1, n do
-              local raw = redis.call('GET', KEYS[i])
-              local count = 0
-              if raw then
-                count = tonumber(raw)
-              end
-              if count >= tonumber(ARGV[(i - 1) * 2 + 1]) then
-                return {0, i, redis.call('PTTL', KEYS[i])}
+              local p = cjson.decode(ARGV[i])
+              if p.algo == 1 then
+                local raw = redis.call('GET', KEYS[i])
+                local count = raw and tonumber(raw) or 0
+                if count >= p.limit then
+                  local ttl = redis.call('PTTL', KEYS[i])
+                  if ttl < 0 then ttl = p.windowMs end
+                  return {0, i, math.max(1, math.ceil(ttl / 1000)), p.limit}
+                end
+              elseif p.algo == 2 then
+                redis.call('ZREMRANGEBYSCORE', KEYS[i], 0, nowms - p.windowMs)
+                local count = redis.call('ZCARD', KEYS[i])
+                if count >= p.limit then
+                  local oldest = redis.call('ZRANGE', KEYS[i], 0, 0, 'WITHSCORES')
+                  local retry = p.windowMs
+                  if #oldest >= 2 then retry = math.max(1, oldest[2] + p.windowMs - nowms) end
+                  return {0, i, math.max(1, math.ceil(retry / 1000)), p.limit}
+                end
+              elseif p.algo == 3 then
+                local idx = math.floor(nowms / p.windowMs)
+                local cur = tonumber(redis.call('GET', KEYS[i] .. ':w' .. idx) or '0')
+                local prev = tonumber(redis.call('GET', KEYS[i] .. ':w' .. (idx - 1)) or '0')
+                local elapsed = nowms % p.windowMs
+                local est = cur + prev * (1 - elapsed / p.windowMs)
+                if est >= p.limit then
+                  return {0, i, math.max(1, math.ceil((p.windowMs - elapsed) / 1000)), p.limit}
+                end
+              elseif p.algo == 4 then
+                local h = redis.call('HMGET', KEYS[i], 'tok', 'ts')
+                local tokens = tonumber(h[1]) or p.capacity
+                local ts = tonumber(h[2]) or nowms
+                local elapsed = math.max(0, nowms - ts)
+                tokens = math.min(p.capacity, tokens + elapsed * p.capacity / p.refillMs)
+                if tokens < p.cost then
+                  local wait = (p.cost - tokens) * p.refillMs / p.capacity
+                  return {0, i, math.max(1, math.ceil(wait / 1000)), p.capacity}
+                end
+              elseif p.algo == 5 then
+                local raw = redis.call('GET', KEYS[i])
+                local depth = raw and tonumber(raw) or 0
+                if depth >= p.queueCap then
+                  local ttl = redis.call('PTTL', KEYS[i])
+                  if ttl < 0 then ttl = p.windowMs end
+                  return {0, i, math.max(1, math.ceil(ttl / 1000)), p.queueCap}
+                end
+              elseif p.algo == 6 then
+                local held = redis.call('SCARD', KEYS[i])
+                if held >= p.maxConc then
+                  local ttl = redis.call('PTTL', KEYS[i])
+                  if ttl < 0 then ttl = p.leaseMs end
+                  return {0, i, math.max(1, math.ceil(ttl / 1000)), p.maxConc}
+                end
               end
             end
-            local out = {1}
+            local govLimit = 0
+            local govRemaining = 0
             for i = 1, n do
-              local count = redis.call('INCR', KEYS[i])
-              if count == 1 then
-                redis.call('PEXPIRE', KEYS[i], ARGV[(i - 1) * 2 + 2])
+              local p = cjson.decode(ARGV[i])
+              if p.algo == 1 then
+                local count = redis.call('INCR', KEYS[i])
+                local elapsed = nowms % p.windowMs
+                local ttl = p.windowMs - elapsed + p.graceMs
+                if count == 1 then redis.call('PEXPIRE', KEYS[i], ttl) end
+                if redis.call('PTTL', KEYS[i]) < 0 then redis.call('PEXPIRE', KEYS[i], ttl) end
+                if i == 1 then govLimit, govRemaining = p.limit, math.max(0, p.limit - count) end
+              elseif p.algo == 2 then
+                redis.call('ZADD', KEYS[i], nowms, p.member)
+                redis.call('PEXPIRE', KEYS[i], p.windowMs + p.graceMs)
+                if i == 1 then
+                  local count = redis.call('ZCARD', KEYS[i])
+                  govLimit, govRemaining = p.limit, math.max(0, p.limit - count)
+                end
+              elseif p.algo == 3 then
+                local idx = math.floor(nowms / p.windowMs)
+                local curKey = KEYS[i] .. ':w' .. idx
+                local prevKey = KEYS[i] .. ':w' .. (idx - 1)
+                local count = redis.call('INCR', curKey)
+                redis.call('PEXPIRE', curKey, 2 * p.windowMs + p.graceMs)
+                redis.call('PEXPIRE', prevKey, 2 * p.windowMs + p.graceMs)
+                if i == 1 then govLimit, govRemaining = p.limit, math.max(0, p.limit - count) end
+              elseif p.algo == 4 then
+                local h = redis.call('HMGET', KEYS[i], 'tok', 'ts')
+                local tokens = tonumber(h[1]) or p.capacity
+                local ts = tonumber(h[2]) or nowms
+                local elapsed = math.max(0, nowms - ts)
+                tokens = math.min(p.capacity, tokens + elapsed * p.capacity / p.refillMs)
+                tokens = tokens - p.cost
+                redis.call('HSET', KEYS[i], 'tok', tokens, 'ts', nowms)
+                redis.call('PEXPIRE', KEYS[i], 2 * p.refillMs + p.graceMs)
+                if i == 1 then govLimit, govRemaining = p.capacity, math.max(0, math.floor(tokens)) end
+              elseif p.algo == 5 then
+                local depth = redis.call('INCR', KEYS[i])
+                if depth == 1 then redis.call('PEXPIRE', KEYS[i], p.windowMs) end
+                local ttl = redis.call('PTTL', KEYS[i])
+                if ttl < 0 then redis.call('PEXPIRE', KEYS[i], p.windowMs) end
+                if i == 1 then govLimit, govRemaining = p.queueCap, math.max(0, p.queueCap - depth) end
+              elseif p.algo == 6 then
+                redis.call('SADD', KEYS[i], p.member)
+                redis.call('PEXPIRE', KEYS[i], p.leaseMs)
+                if i == 1 then
+                  local held = redis.call('SCARD', KEYS[i])
+                  govLimit, govRemaining = p.maxConc, math.max(0, p.maxConc - held)
+                end
               end
-              local ttl = redis.call('PTTL', KEYS[i])
-              if ttl < 0 then
-                redis.call('PEXPIRE', KEYS[i], ARGV[(i - 1) * 2 + 2])
-                ttl = tonumber(ARGV[(i - 1) * 2 + 2])
-              end
-              out[#out + 1] = count
-              out[#out + 1] = ttl
             end
-            return out
+            return {1, govLimit, govRemaining}
             """, List.class);
 
     private final StringRedisTemplate redis;
@@ -160,43 +251,129 @@ public class RedisRateLimitStore implements RateLimitStore {
         if (charges.isEmpty()) {
             throw new IllegalArgumentException("consumeAll requires at least one charge");
         }
+        // One member per batch for sorted-set and lease entries. UUID plus the index keeps concurrent
+        // batches from overwriting each other's members.
+        String batch = java.util.UUID.randomUUID().toString();
         var keys = new java.util.ArrayList<String>(charges.size());
-        var args = new java.util.ArrayList<String>(charges.size() * 2);
-        var ttls = new java.util.ArrayList<Long>(charges.size());
-        for (Charge charge : charges) {
-            long windowMillis = charge.policy().window().toMillis();
-            long elapsed = Math.floorMod(nowMillis, windowMillis);
-            long ttlMillis = (windowMillis - elapsed) + ttlGrace.toMillis();
-            keys.add(key(charge.policy(), charge.identityType(), charge.identity(), nowMillis));
-            args.add(String.valueOf(charge.policy().limit()));
-            args.add(String.valueOf(ttlMillis));
-            ttls.add(ttlMillis);
+        var args = new java.util.ArrayList<String>(charges.size());
+        var leases = new java.util.LinkedHashMap<String, String>();
+        for (int i = 0; i < charges.size(); i++) {
+            Charge charge = charges.get(i);
+            var policy = charge.policy();
+            keys.add(stateKey(policy, charge.identityType(), charge.identity(), nowMillis));
+            String member = batch + ":" + i;
+            args.add(paramsJson(policy, member));
+            if (policy.algorithm() == com.example.ratelimit.policy.Algorithm.CONCURRENCY_LIMIT) {
+                leases.put(policy.id(), member);
+            }
         }
 
         try {
             @SuppressWarnings("unchecked")
             List<Long> result = redis.execute(BATCH, keys, args.toArray(new String[0]));
-            if (result == null || result.isEmpty() || result.get(0) == null) {
+            // Denial layout {0, index, retrySecs, limit} has 4 elements; success {1, govLimit,
+            // govRemaining} has 3. Both carry everything the decision needs.
+            if (result == null || result.size() < 3 || result.get(0) == null) {
                 throw new RateLimitStoreUnavailableException("redis returned no batch decision", null);
             }
             if (result.get(0) == 0) {
                 int blockedIndex = result.get(1).intValue() - 1;
-                Charge blocked = charges.get(blockedIndex);
-                long pttl = result.get(2);
-                long effectiveTtl = pttl >= 0 ? pttl : ttls.get(blockedIndex);
-                long retryAfter = Math.max(1, Math.ceilDiv(effectiveTtl, 1000));
-                return new BatchDecision(blockedIndex,
-                        RateLimitDecision.reject(blocked.policy().limit(), Duration.ofSeconds(retryAfter)));
+                return new BatchDecision(blockedIndex, RateLimitDecision.reject(
+                        result.get(3).intValue(), Duration.ofSeconds(Math.max(1, result.get(2)))),
+                        java.util.Map.of());
             }
-            // Success layout: {1, c1, t1, c2, t2, ...}. The governing decision is the first policy's,
-            // matching the most-specific-first order the enforcer supplies.
-            Charge governing = charges.get(0);
-            long count = result.get(1);
-            return new BatchDecision(-1, RateLimitDecision.allow(governing.policy().limit(),
-                    (int) Math.max(0, governing.policy().limit() - count)));
+            return new BatchDecision(-1, RateLimitDecision.allow(result.get(1).intValue(),
+                    result.get(2).intValue()), java.util.Map.copyOf(leases));
         } catch (DataAccessException e) {
             throw new RateLimitStoreUnavailableException("redis unavailable", e);
         }
+    }
+
+    @Override
+    public void releaseConcurrency(com.example.ratelimit.policy.PolicyDocument policy, String identityType,
+            String identity, String leaseId) {
+        if (policy.algorithm() != com.example.ratelimit.policy.Algorithm.CONCURRENCY_LIMIT) {
+            return;
+        }
+        String key = stateKey(policy, identityType, identity, System.currentTimeMillis());
+        try {
+            redis.opsForSet().remove(key, leaseId);
+            Long remaining = redis.opsForSet().size(key);
+            if (remaining != null && remaining == 0) {
+                redis.delete(key);
+            }
+        } catch (DataAccessException e) {
+            // The request already completed; a lost release is bounded by the lease TTL.
+            org.slf4j.LoggerFactory.getLogger(RedisRateLimitStore.class)
+                    .warn("concurrency release failed for policy {}: {}", policy.id(), e.getMessage());
+        }
+    }
+
+    /**
+     * State key per algorithm. Fixed-window counters keep the original layout so existing counters,
+     * tests and dashboards keep working; every newer algorithm lives under a {@code rl:v2} namespace
+     * that names the algorithm, keeping counters, buckets, queues and leases visibly separate.
+     */
+    String stateKey(com.example.ratelimit.policy.PolicyDocument policy, String identityType,
+            String identity, long nowMillis) {
+        String subject = identityType.toLowerCase() + ":" + hash(identity);
+        return switch (policy.algorithm()) {
+            case FIXED_WINDOW -> key(fixedProjection(policy), identityType, identity, nowMillis);
+            case SLIDING_WINDOW -> "%s:sw:%s:%s".formatted(keyPrefix, policy.id(), subject);
+            case SLIDING_WINDOW_COUNTER -> "%s:sc:%s:%s".formatted(keyPrefix, policy.id(), subject);
+            case TOKEN_BUCKET -> "%s:tb:%s:%s".formatted(keyPrefix, policy.id(), subject);
+            case LEAKY_BUCKET -> "%s:lb:%s:%s".formatted(keyPrefix, policy.id(), subject);
+            case CONCURRENCY_LIMIT -> "%s:cc:%s:%s".formatted(keyPrefix, policy.id(), subject);
+        };
+    }
+
+    /** Numbers-only JSON the batch script decodes with cjson. */
+    private String paramsJson(com.example.ratelimit.policy.PolicyDocument policy, String member) {
+        var algo = policy.algorithm();
+        // Leaky policing has no window; its counter TTL is the drain horizon, so overflow retries
+        // land when space plausibly exists. windowMs carries that horizon for this algorithm only.
+        long windowMs = policy.window() == null ? 0 : policy.window().toMillis();
+        int cost = policy.cost() == null ? 1 : policy.cost();
+        if (algo == com.example.ratelimit.policy.Algorithm.LEAKY_BUCKET) {
+            windowMs = policy.drainRate() == null || policy.drainRate() < 1 || policy.queueCapacity() == null
+                    ? 0
+                    : (long) Math.ceil((double) policy.queueCapacity() / policy.drainRate() * 1000);
+        }
+        return "{\"algo\":" + algoId(algo)
+                + ",\"limit\":" + (policy.limit() == null ? 0 : policy.limit())
+                + ",\"windowMs\":" + windowMs
+                + ",\"graceMs\":" + ttlGrace.toMillis()
+                + ",\"capacity\":" + (policy.capacity() == null ? 0 : policy.capacity())
+                + ",\"refillMs\":" + (policy.refillInterval() == null ? 0 : policy.refillInterval().toMillis())
+                + ",\"cost\":" + cost
+                + ",\"drainRate\":" + (policy.drainRate() == null ? 0 : policy.drainRate())
+                + ",\"queueCap\":" + (policy.queueCapacity() == null ? 0 : policy.queueCapacity())
+                + ",\"maxConc\":" + (policy.maxConcurrent() == null ? 0 : policy.maxConcurrent())
+                + ",\"leaseMs\":" + (policy.leaseDuration() == null ? 0 : policy.leaseDuration().toMillis())
+                + ",\"member\":\"" + member + "\"}";
+    }
+
+    private static int algoId(com.example.ratelimit.policy.Algorithm algo) {
+        return switch (algo) {
+            case FIXED_WINDOW -> 1;
+            case SLIDING_WINDOW -> 2;
+            case SLIDING_WINDOW_COUNTER -> 3;
+            case TOKEN_BUCKET -> 4;
+            case LEAKY_BUCKET -> 5;
+            case CONCURRENCY_LIMIT -> 6;
+        };
+    }
+
+    private static RateLimitProperties.Policy fixedProjection(
+            com.example.ratelimit.policy.PolicyDocument policy) {
+        RateLimitProperties.Identity identity =
+                policy.scope() == com.example.ratelimit.policy.Scope.USER
+                        ? RateLimitProperties.Identity.USER
+                        : RateLimitProperties.Identity.IP;
+        return new RateLimitProperties.Policy(policy.id(), policy.method(), policy.path(),
+                policy.limit() == null ? 0 : policy.limit(),
+                policy.window() == null ? Duration.ofSeconds(1) : policy.window(), identity,
+                policy.onRedisError());
     }
 
     /** sha-256 hex, first 16 chars: identifiers stay private and keys stay fixed width. */

@@ -53,6 +53,7 @@ describe('AdminPoliciesComponent', () => {
     http.expectOne(`${BASE}/capabilities`).flush(caps);
     http.expectOne(`${BASE}/policies`).flush(policies);
     http.expectOne((req) => req.url.startsWith(`${BASE}/audit`)).flush([]);
+    http.expectOne(`${BASE}/keys`).flush([]);
     await loggingIn;
   }
 

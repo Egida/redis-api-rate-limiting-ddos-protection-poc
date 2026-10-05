@@ -291,28 +291,53 @@ access method=GET path=/api/products status=200 outcome=ALLOWED durationMs=5 cli
 ## 5.6. Administration API, capabilities, and console
 
 `GET /api/admin/rate-limit/capabilities` (ROLE_ADMIN) reports exactly what the build enforces:
-algorithms with `implemented` flags (only `FIXED_WINDOW` true), scopes (`API_KEY` false), the AND
-composition rule, and the `single-redis` topology note. The Angular **Admin → Rate Limit Policies**
-section (`features/admin/`, `core/admin-api.service.ts`) binds its algorithm/scope dropdowns to this
-response, so unimplemented options render disabled and can never be saved as working. The section
-covers login (Basic, memory-only credentials, never stored), list, create/edit with server-version
-conflict messaging, enable/disable, two-click delete, audit history, and a bounded probe (max 30
-sequential requests, cancellable) that reuses the demo runner. `GET /api/poc/policies` stays read-only
-for the dashboard.
+all six algorithms with `implemented: true` and per-algorithm parameter schemas, all five scopes
+implemented, the AND composition rule, and the `single-redis` topology note. The Angular **Admin →
+Rate Limit Policies** section (`features/admin/`, `core/admin-api.service.ts`) binds its
+algorithm/scope dropdowns and per-algorithm field groups to this response. The section covers login
+(Basic, memory-only credentials, never stored), list, create/edit with server-version conflict
+messaging, enable/disable, two-click delete, audit history, API-key issue/revoke (raw secret shown
+once), and a bounded probe (max 30 sequential requests, cancellable) that reuses the demo runner.
+`GET /api/poc/policies` stays read-only for the dashboard.
+
+### Enforced algorithms (all in one atomic Lua batch, Redis server time)
+
+- **Fixed Window** — epoch-aligned counter, original semantics and key layout preserved.
+- **Exact Sliding Window** — sorted-set rolling log; trims expired, counts, decides and records
+  atomically; unique member per batch so concurrent calls never overwrite; retry from the oldest
+  event that must expire; memory bounded by `limit` members per identity; idle keys expire.
+- **Sliding-Window Counter** — `estimate = current + previous × (1 − elapsed/window)`; approximate
+  by definition and labeled so in the UI and docs; both window keys expire.
+- **Token Bucket** — capacity, balance, refill timestamp in one hash, refilled and spent atomically;
+  no negative balances; idle buckets expire; burst = capacity, sustained = capacity/refillInterval
+  (100 capacity + 10s refill sustains 10/sec, not 100/min); request cost supported.
+- **Leaky Bucket** — POLICING only, labeled as such everywhere: depth counter with TTL set to the
+  drain horizon (`queueCapacity/drainRate`); overflow is rejected, never queued; no request waits.
+- **Concurrency Limit** — Redis set of unique lease ids per scope; atomic acquire; owner-checked
+  release in `finally` (plus an async-listener path for async dispatches); crashed holders reclaimed
+  by lease expiry; `leaseDuration` is the maximum request duration — a longer request may lose its
+  permit. Saturation is 429, consistent with every other denial.
+
+### API keys
+
+`POST/GET/DELETE /api/admin/rate-limit/keys` (ROLE_ADMIN). Raw secret returned once at creation;
+only the SHA-256 digest is stored (`ratelimit:apikey:v1:*`, no TTL — durable until revoked).
+`API_KEY` policies resolve `X-API-Key` server-side to owner/tier; missing/unknown/revoked keys get
+401, never 429. Tier is administrative metadata; per-tier rate differences are separate policies.
 
 ---
 
-## 6. Tests — 90 JVM tests across 10 classes
+## 6. Tests — 99 JVM tests across 10 classes
 
 | File | @Test | What it establishes |
 |---|---|---|
-| `PolicyAdminControllerTest` | 12 | Admin boundary: anonymous 401, demo USER 403, admin CRUD lifecycle, stale version 409, invalid policy 400, unimplemented algorithm refused, audit without secrets, capabilities content + auth |
+| `PolicyAdminControllerTest` | 14 | Admin boundary: anonymous 401, demo USER 403, admin CRUD lifecycle, stale version 409, invalid policy 400, implemented algorithms save, audit without secrets, capabilities content + auth, API-key issue/use/revoke lifecycle, key endpoints admin-only |
 | `ManagedPolicyStoreTest` | 12 | Redis round trip, policy/counter namespacing, create refusal, stale-version conflict, version advance, concurrent-save winner, delete, audit, seed/reset, validation |
 | `RateLimitIdentityResolverTest` | 25 | IPv4 spelling canonicalisation, XFF right-to-left walk, forged leftmost prefix, multi-hop, all-trusted, untrusted peer, IPv6 |
 | `RateLimitHttpIntegrationTest` | 7 | Below-limit passes, beyond-limit 429 with retry info, per-user isolation, authenticated route limits by user not IP, 401 is not rate-limited, excluded routes pass, bounded metric labels |
 | `RateLimitRedisFailureTest` | 9 | Fail-closed 503, fail-open passes, global default applies, kill switch skips the store, unlisted route uncounted, fail-closed makes no quota claim, most-specific policy wins, duplicate id fails startup |
 | `RateLimitConfigurationValidationTest` | 6 | Config binding and validation |
-| `RedisRateLimitStoreTest` | 8 | Allow-then-reject, identities independent, policies independent, TTL set and key gone after window, key shape, `twoStoreInstancesShareOneLimit`, atomic batch denial charges nothing, concurrent batches take the last unit exactly once |
+| `RedisRateLimitStoreTest` | 15 | Allow-then-reject, identities independent, policies independent, TTL set and key gone after window, key shape, `twoStoreInstancesShareOneLimit`, atomic batch denial charges nothing, concurrent batches take the last unit exactly once, sliding-log exactness/expiry, counter interpolation, token burst/cost/expiry, leaky policing overflow, concurrency cap/release, mixed-algorithm atomicity + race |
 | `PocMetadataControllerTest` | 6 | `/api/poc/policies` contract; asserts `/index.html` → 404 |
 | `RateLimitWindowBoundaryTest` | 4 | Fresh quota every window, Retry-After reflects real time left, keys carry policy and hashed identity, preflight denial charges nothing |
 | `RateLimitConcurrencyTest` | 1 | `exactAllowanceUnderParallelLoad` |
@@ -348,7 +373,7 @@ Measured in this environment, not quoted from anywhere.
 
 | Command | Result |
 |---|---|
-| `mvn -B -o clean test` | Tests run 90, Failures 0, Errors 0 — BUILD SUCCESS |
+| `mvn -B -o clean test` | Tests run 99, Failures 0, Errors 0 — BUILD SUCCESS |
 | `npm test` | 5 suites, 25/25 passed, 4.46 s |
 | `npm run build` | Initial 244.44 kB, Transfer 66.15 kB, bundle 4.847 s |
 | `verify-all.ps1 -SkipBuild -SkipUnitTests` | 133.50 s, every step OK |
@@ -479,6 +504,14 @@ State these before a reviewer finds them.
 9. **`Retry-After` may exceed the window end** by the `ttl-grace` (1s).
 10. **A misconfigured proxy that appends rather than overwrites** `X-Forwarded-For` breaks the
     right-to-left walk, making the limit over-restrictive rather than bypassable.
+11. **Approximations are labeled, not hidden.** The sliding-window counter is an estimate; token
+    balances use floating point; a concurrency permit may be reclaimed after `leaseDuration` even if
+    its request is still running.
+12. **Leaky bucket is policing, not shaping.** Overflow rejects; nothing queues, no request waits.
+13. **Key tiers are metadata.** The registry resolves owner and tier, but per-tier rate differences
+    need separate policies.
+14. **Single Redis, no Cluster.** Multi-key batch scripts span slots without hash tags; Cluster would
+    need shared-slot keys and is untested.
 
 Production recommendations are in design doc §14.
 
@@ -604,7 +637,7 @@ The brief this POC answers has 11 scope items and 16 acceptance criteria. All ar
 | 12 | Documented key convention | `RedisRateLimitStore:95`, design doc §4 |
 | 13 | Allowed/rejected statistics | `ratelimit.requests` counter, tagged by outcome |
 | 14 | Redis failure handled | per-policy fail-open/closed, 503 on fail-closed |
-| 15 | Six required test classes | 90 tests across 10 classes — see §6 |
+| 15 | Six required test classes | 99 tests across 10 classes — see §6 |
 | 16 | Eight documentation topics | design doc 15 sections + README + 3 report formats |
 
 **Sample limits match the brief exactly:** `GET /api/products` 100/min/IP,

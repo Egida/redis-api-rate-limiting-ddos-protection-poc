@@ -206,15 +206,15 @@ class PolicyAdminControllerTest {
     }
 
     @Test
-    void unimplementedAlgorithmIsRefusedRatherThanStoredAsIfItWorked() {
+    void implementedAlgorithmsSaveAndBecomeEnforceable() {
         var tokenBucket = Map.of(
                 "id", "tb-route", "method", "GET", "path", "/api/tb",
                 "algorithm", "TOKEN_BUCKET", "scope", "IP",
                 "capacity", 100, "refillInterval", "PT10S", "enabled", true);
         ResponseEntity<String> response = rest.exchange("/api/admin/rate-limit/policies", HttpMethod.POST,
                 new HttpEntity<>(tokenBucket, admin()), String.class);
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(response.getBody()).contains("not implemented");
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(response.getBody()).contains("\"algorithmImplemented\":true");
     }
 
     @Test
@@ -260,8 +260,8 @@ class PolicyAdminControllerTest {
                 new HttpEntity<>(admin()), String.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).contains("\"name\":\"FIXED_WINDOW\",\"implemented\":true");
-        assertThat(response.getBody()).contains("\"name\":\"TOKEN_BUCKET\",\"implemented\":false");
-        assertThat(response.getBody()).contains("\"name\":\"API_KEY\",\"implemented\":false");
+        assertThat(response.getBody()).contains("\"name\":\"TOKEN_BUCKET\",\"implemented\":true");
+        assertThat(response.getBody()).contains("\"name\":\"API_KEY\",\"implemented\":true");
         assertThat(response.getBody()).contains("single-redis");
     }
 
@@ -271,6 +271,69 @@ class PolicyAdminControllerTest {
                 String.class);
         assertThat(anonymous.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
         ResponseEntity<String> denied = rest.exchange("/api/admin/rate-limit/capabilities", HttpMethod.GET,
+                new HttpEntity<>(demoUser()), String.class);
+        assertThat(denied.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    void apiKeyLifecycleIsDigestOnlyAndEnforced() {
+        // Issue a key. The raw secret appears exactly once, in this response.
+        ResponseEntity<String> created = rest.exchange("/api/admin/rate-limit/keys", HttpMethod.POST,
+                new HttpEntity<>(Map.of("owner", "key-owner", "tier", "standard"), admin()), String.class);
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        String rawKey = created.getBody().replaceAll("(?s).*\"key\"\\s*:\\s*\"([^\"]+)\".*", "$1");
+        assertThat(rawKey).startsWith("rg_");
+
+        // The listing exposes digests and owners, never the secret.
+        ResponseEntity<String> listed = rest.exchange("/api/admin/rate-limit/keys", HttpMethod.GET,
+                new HttpEntity<>(admin()), String.class);
+        assertThat(listed.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(listed.getBody()).contains("key-owner").doesNotContain(rawKey);
+
+        // An API_KEY policy on a public route composes with the route policy: the tighter key quota binds.
+        var keyPolicy = Map.of(
+                "id", "key-quota", "method", "GET", "path", "/api/products",
+                "algorithm", "FIXED_WINDOW", "scope", "API_KEY",
+                "window", "PT1M", "limit", 2, "enabled", true);
+        ResponseEntity<String> saved = rest.exchange("/api/admin/rate-limit/policies", HttpMethod.POST,
+                new HttpEntity<>(keyPolicy, admin()), String.class);
+        assertThat(saved.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
+        var keyHeaders = new HttpHeaders();
+        keyHeaders.set("X-API-Key", rawKey);
+        for (int i = 0; i < 2; i++) {
+            ResponseEntity<String> allowed = rest.exchange("/api/products", HttpMethod.GET,
+                    new HttpEntity<>(keyHeaders), String.class);
+            assertThat(allowed.getStatusCode()).as("keyed request %d", i + 1).isEqualTo(HttpStatus.OK);
+        }
+        ResponseEntity<String> exhausted = rest.exchange("/api/products", HttpMethod.GET,
+                new HttpEntity<>(keyHeaders), String.class);
+        assertThat(exhausted.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(exhausted.getHeaders().getFirst("X-RateLimit-Policy")).isEqualTo("key-quota");
+
+        // No key, unknown key: 401, never 429 — there is no identity to charge.
+        ResponseEntity<String> missing = rest.getForEntity("/api/products", String.class);
+        var bogusHeaders = new HttpHeaders();
+        bogusHeaders.set("X-API-Key", "rg_0000000000000000000000000000000000000000");
+        ResponseEntity<String> bogus = rest.exchange("/api/products", HttpMethod.GET,
+                new HttpEntity<>(bogusHeaders), String.class);
+        // Note: /api/products also matches products-read, but the key policy denies first with 401.
+        assertThat(missing.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(bogus.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+
+        // Revoke: the same secret stops working immediately, across instances sharing this Redis.
+        String keyId = created.getBody().replaceAll("(?s).*\"keyId\"\\s*:\\s*\"([^\"]+)\".*", "$1");
+        ResponseEntity<String> revoked = rest.exchange("/api/admin/rate-limit/keys/" + keyId,
+                HttpMethod.DELETE, new HttpEntity<>(admin()), String.class);
+        assertThat(revoked.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        ResponseEntity<String> afterRevoke = rest.exchange("/api/products", HttpMethod.GET,
+                new HttpEntity<>(keyHeaders), String.class);
+        assertThat(afterRevoke.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void keyManagementIsAdminOnly() {
+        ResponseEntity<String> denied = rest.exchange("/api/admin/rate-limit/keys", HttpMethod.GET,
                 new HttpEntity<>(demoUser()), String.class);
         assertThat(denied.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }

@@ -246,16 +246,15 @@ class ManagedPolicyStoreTest {
     }
 
     @Test
-    void unimplementedAlgorithmIsRejectedRatherThanSilentlyStored() {
+    void implementedAlgorithmsAreStorable() {
         var now = Instant.now();
         var tokenBucket = PolicyDocument.builder("tb")
                 .route("GET", "/api/tb")
                 .algorithm(Algorithm.TOKEN_BUCKET).scope(Scope.IP)
                 .bucket(100, Duration.ofSeconds(10), 1)
                 .version(1).timestamps(now, now).build();
-        assertThatThrownBy(() -> store.save(tokenBucket, null, "admin"))
-                .isInstanceOf(PolicyValidationException.class)
-                .hasMessageContaining("not implemented");
-        assertThat(store.find("tb")).isEmpty();
+        var saved = store.save(tokenBucket, null, "admin");
+        assertThat(saved.algorithm()).isEqualTo(Algorithm.TOKEN_BUCKET);
+        assertThat(store.find("tb")).isPresent();
     }
 }

@@ -50,10 +50,13 @@ public class PolicyAdminController {
 
     private final ManagedPolicyStore store;
     private final PolicySeeder seeder;
+    private final com.example.ratelimit.policy.ApiKeyRegistry keys;
 
-    public PolicyAdminController(ManagedPolicyStore store, PolicySeeder seeder) {
+    public PolicyAdminController(ManagedPolicyStore store, PolicySeeder seeder,
+            com.example.ratelimit.policy.ApiKeyRegistry keys) {
         this.store = store;
         this.seeder = seeder;
+        this.keys = keys;
     }
 
     @GetMapping("/policies")
@@ -71,32 +74,74 @@ public class PolicyAdminController {
         return new CapabilitiesResponse(
                 List.of(
                         new AlgorithmCapability("FIXED_WINDOW", true,
-                                "Counter per epoch-aligned window. Preserves the original POC semantics."),
-                        new AlgorithmCapability("SLIDING_WINDOW", false,
-                                "Not implemented: no rolling-log enforcement exists in this build."),
-                        new AlgorithmCapability("SLIDING_WINDOW_COUNTER", false,
-                                "Not implemented: no weighted-counter enforcement exists in this build."),
-                        new AlgorithmCapability("TOKEN_BUCKET", false,
-                                "Not implemented: no bucket/refill enforcement exists in this build."),
-                        new AlgorithmCapability("LEAKY_BUCKET", false,
-                                "Not implemented: no queue/drain enforcement exists in this build."),
-                        new AlgorithmCapability("CONCURRENCY_LIMIT", false,
-                                "Not implemented: no distributed-permit enforcement exists in this build.")),
+                                "Counter per epoch-aligned window. Preserves the original POC semantics.",
+                                List.of(
+                                        new Parameter("limit", true, "Requests allowed per window."),
+                                        new Parameter("window", true,
+                                                "Window length, ISO-8601 duration of at least 1s."))),
+                        new AlgorithmCapability("SLIDING_WINDOW", true,
+                                "Exact rolling window: at most limit events in any trailing window. State is one "
+                                        + "sorted set per identity, trimmed on every decision and expired when idle; "
+                                        + "memory is bounded by limit entries per identity.",
+                                List.of(
+                                        new Parameter("limit", true, "Events allowed per trailing window."),
+                                        new Parameter("window", true,
+                                                "Trailing window length, ISO-8601 duration of at least 1s."))),
+                        new AlgorithmCapability("SLIDING_WINDOW_COUNTER", true,
+                                "APPROXIMATE rolling window: current count plus the previous window count weighted "
+                                        + "by how far the current window has advanced. Cheap, but an estimate, not a "
+                                        + "guarantee.",
+                                List.of(
+                                        new Parameter("limit", true, "Approximate ceiling per window."),
+                                        new Parameter("window", true,
+                                                "Window length, ISO-8601 duration of at least 1s."))),
+                        new AlgorithmCapability("TOKEN_BUCKET", true,
+                                "Burst of capacity, then a sustained rate of capacity per refillInterval. "
+                                        + "Capacity 100 with a 10s refill sustains 10/sec after the burst; "
+                                        + "it does not mean 100/min. Cost defaults to 1.",
+                                List.of(
+                                        new Parameter("capacity", true, "Burst size in tokens."),
+                                        new Parameter("refillInterval", true,
+                                                "Time to refill an empty bucket, ISO-8601 duration of at least 1s."),
+                                        new Parameter("cost", false,
+                                                "Tokens per request, at least 1. Defaults to 1."))),
+                        new AlgorithmCapability("LEAKY_BUCKET", true,
+                                "POLICING, not queued shaping: requests beyond queueCapacity are rejected, never "
+                                        + "queued. The counter drains over queueCapacity/drainRate seconds, which is "
+                                        + "also the retry horizon.",
+                                List.of(
+                                        new Parameter("drainRate", true, "Requests drained per second."),
+                                        new Parameter("queueCapacity", true, "Burst depth before overflow rejects."))),
+                        new AlgorithmCapability("CONCURRENCY_LIMIT", true,
+                                "Caps in-flight requests across all instances with Redis leases. Permits release when "
+                                        + "the request completes; crashed holders are reclaimed when the lease "
+                                        + "expires. leaseDuration is the maximum request duration: a request running "
+                                        + "longer may lose its permit.",
+                                List.of(
+                                        new Parameter("maxConcurrent", true, "Permits shared across instances."),
+                                        new Parameter("leaseDuration", true,
+                                                "Maximum request duration, ISO-8601 duration of at least 1s.")))),
                 List.of(
                         new ScopeCapability("ENDPOINT", true, "Method plus route template."),
                         new ScopeCapability("IP", true, "Canonical client IP behind trusted-proxy gating."),
                         new ScopeCapability("USER", true,
-                                "Authenticated principal; falls back to IP when unauthenticated."),
+                                "Authenticated principal; falls back to IP when unauthenticated. A USER policy on a "
+                                        + "wide route pattern shares one quota across endpoints."),
                         new ScopeCapability("GLOBAL", true,
                                 "One quota shared by every route and identity on every instance."),
-                        new ScopeCapability("API_KEY", false,
-                                "Not implemented: no key registry or tier lookup exists in this build.")),
+                        new ScopeCapability("API_KEY", true,
+                                "Server-validated key from the X-API-Key header, resolved to owner and tier. "
+                                        + "Manage keys under /api/admin/rate-limit/keys; only digests are stored.")),
                 "AND: every applicable enabled policy must allow. One atomic batch inspects all "
                         + "counters before charging any, so a denial charges nothing anywhere.",
                 "single-redis: batch scripts span keys without hash tags; Redis Cluster is unsupported.");
     }
 
-    public record AlgorithmCapability(String name, boolean implemented, String note) {
+    public record AlgorithmCapability(String name, boolean implemented, String note,
+            List<Parameter> parameters) {
+    }
+
+    public record Parameter(String name, boolean required, String help) {
     }
 
     public record ScopeCapability(String name, boolean implemented, String note) {
@@ -193,6 +238,44 @@ public class PolicyAdminController {
         int removed = store.reset(actor(auth));
         int reseeded = seeder.seed(actor(auth));
         return ResponseEntity.ok(new ResetResponse(removed, reseeded, Instant.now()));
+    }
+
+    /**
+     * Issues an API key. The raw secret is in this response exactly once; it is never stored and
+     * cannot be recovered. Only the digest reaches Redis.
+     */
+    @PostMapping("/keys")
+    public ResponseEntity<KeyResponse> createKey(@RequestBody KeyRequest request, Authentication auth) {
+        var created = keys.create(request.owner(), request.tier(), actor(auth));
+        return ResponseEntity.status(HttpStatus.CREATED).body(new KeyResponse(
+                created.metadata().keyId(), created.metadata().owner(), created.metadata().tier(),
+                created.metadata().enabled(), created.metadata().createdAt(), created.rawKey()));
+    }
+
+    /** Key metadata. Digests and owners only, never raw secrets. */
+    @GetMapping("/keys")
+    public List<KeyMetadata> listKeys() {
+        return keys.list().stream()
+                .map(k -> new KeyMetadata(k.keyId(), k.owner(), k.tier(), k.enabled(), k.createdAt()))
+                .toList();
+    }
+
+    @DeleteMapping("/keys/{keyId}")
+    public ResponseEntity<Void> revokeKey(@PathVariable String keyId, Authentication auth) {
+        if (!keys.revoke(keyId, actor(auth))) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.noContent().build();
+    }
+
+    public record KeyRequest(String owner, String tier) {
+    }
+
+    public record KeyResponse(String keyId, String owner, String tier, boolean enabled, Instant createdAt,
+            String key) {
+    }
+
+    public record KeyMetadata(String keyId, String owner, String tier, boolean enabled, Instant createdAt) {
     }
 
     public record AuditEntryResponse(Instant at, String actor, String policyId, String operation,

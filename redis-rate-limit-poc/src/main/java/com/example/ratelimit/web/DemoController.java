@@ -36,4 +36,28 @@ public class DemoController {
         return Map.of("orderId", "ord-" + Math.abs(principal.getUsername().hashCode()),
                 "placedBy", principal.getUsername());
     }
+
+    private final java.util.concurrent.atomic.AtomicInteger workInFlight = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger workMaxObserved = new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * Slow stand-in for concurrency demonstrations. Sleeps {@code ms} (capped) while holding whatever
+     * concurrency permit the filter acquired, and reports the highest overlap this JVM has seen.
+     *
+     * <p>Per-JVM counters on purpose: the cross-instance script compares the sum of both JVMs'
+     * observed maxima against the configured cap.
+     */
+    @GetMapping("/work")
+    public Map<String, Object> work(@RequestParam(defaultValue = "200") int ms)
+            throws InterruptedException {
+        int bounded = Math.max(0, Math.min(ms, 2000));
+        int current = workInFlight.incrementAndGet();
+        try {
+            workMaxObserved.accumulateAndGet(current, Math::max);
+            Thread.sleep(bounded);
+        } finally {
+            workInFlight.decrementAndGet();
+        }
+        return Map.of("sleptMs", bounded, "maxInFlight", workMaxObserved.get());
+    }
 }

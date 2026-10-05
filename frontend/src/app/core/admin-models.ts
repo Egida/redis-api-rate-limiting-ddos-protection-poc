@@ -35,6 +35,13 @@ export interface PolicyEdit {
   scope?: string;
   window?: string | null;
   limit?: number | null;
+  capacity?: number | null;
+  refillInterval?: string | null;
+  cost?: number | null;
+  drainRate?: number | null;
+  queueCapacity?: number | null;
+  maxConcurrent?: number | null;
+  leaseDuration?: string | null;
   enabled?: boolean | null;
   onRedisError?: 'FAIL_OPEN' | 'FAIL_CLOSED' | null;
   version?: number | null;
@@ -60,6 +67,19 @@ export interface AuditRecord {
   operation: string;
   resultingVersion: number;
   changedFields: string[];
+}
+
+export interface ApiKeyMetadata {
+  keyId: string;
+  owner: string;
+  tier: string;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface ApiKeyCreated extends ApiKeyMetadata {
+  /** Raw secret, present exactly once in the creation response. Show it once, then forget it. */
+  key: string;
 }
 
 export interface AdminApiError {

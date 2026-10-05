@@ -29,11 +29,18 @@ function Assert($condition, $label) {
 }
 
 Write-Output "=== [1/7] build (offline, tests skipped; full suite runs separately) ==="
-Push-Location $root
+# Build in a temp copy of the module: a running backend may hold target/*.jar open, and Windows
+# will not let Maven rename a file a JVM has open. The copy keeps the live tree untouched.
+$buildRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ratelimit-demo-build"
+if (Test-Path $buildRoot) { Remove-Item -Recurse -Force $buildRoot }
+New-Item -ItemType Directory -Path $buildRoot | Out-Null
+Copy-Item "$root\src" "$buildRoot\src" -Recurse
+Copy-Item "$root\pom.xml" "$buildRoot\pom.xml"
+Push-Location $buildRoot
 try {
-  & mvn -B -o -DskipTests package 2>&1 | Select-String -Pattern 'BUILD' | ForEach-Object { Write-Output ("  {0}" -f $_.Line.Trim()) }
+  & mvn -B -o "-Dmaven.test.skip=true" package 2>&1 | Select-String -Pattern 'BUILD' | ForEach-Object { Write-Output ("  {0}" -f $_.Line.Trim()) }
 } finally { Pop-Location }
-$jar = Get-ChildItem "$root\target\redis-rate-limit-poc-*.jar" -Exclude "*sources*", "*.original" |
+$jar = Get-ChildItem "$buildRoot\target\redis-rate-limit-poc-*.jar" -Exclude "*sources*", "*.original" |
   Select-Object -First 1 -ExpandProperty FullName
 if (-not $jar) { throw "no jar produced" }
 
