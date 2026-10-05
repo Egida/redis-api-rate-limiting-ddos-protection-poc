@@ -67,7 +67,14 @@ public class RateLimitIdentityResolver {
         return auth;
     }
 
-    String clientIp(HttpServletRequest request) {
+    /**
+     * Canonical client IP for {@code request}, honouring {@code X-Forwarded-For} / {@code X-Real-IP}
+     * only when the socket peer is a configured trusted proxy.
+     *
+     * <p>Public so the access log and any future reporter resolve identity through this one gated
+     * path. A second, ungated IP reader would let a client spoof the address that shows up in logs.
+     */
+    public String clientIp(HttpServletRequest request) {
         String peer = request.getRemoteAddr();
         if (peer == null) {
             return "unknown";

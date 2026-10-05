@@ -1,5 +1,6 @@
 package com.example.ratelimit.web;
 
+import com.example.ratelimit.ratelimit.RateLimitIdentityResolver;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -11,53 +12,53 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 
 /**
- * Logs every HTTP request with client IP, method, path, status, and rate-limit outcome.
- * Runs after the rate-limit filter so the response status (200/429/401/503) reflects the decision.
+ * One structured line per request: client IP, method, path, outcome, latency, status.
+ *
+ * <p>Registered <em>before</em> the rate-limit filter so it wraps the whole chain and observes the
+ * final status even when the limiter short-circuits with 429 or 503.
+ *
+ * <p>Deliberately does not log: the query string, {@code Authorization}, {@code Cookie}, or any
+ * header value. Query parameters carry tokens on the demo routes, and Tomcat's own header logging is
+ * left at INFO in {@code application.yml} for the same reason.
  */
 public class AccessLogFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(AccessLogFilter.class);
 
+    private final RateLimitIdentityResolver identities;
+
+    public AccessLogFilter(RateLimitIdentityResolver identities) {
+        this.identities = identities;
+    }
+
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
 
-        String clientIp = resolveClientIp(request);
+        String clientIp = identities.clientIp(request);
         String method = request.getMethod();
+        // requestURI only: never the query string, which may hold a token.
         String path = request.getRequestURI();
-        String query = request.getQueryString();
-        String fullPath = query != null ? path + "?" + query : path;
 
-        long start = System.currentTimeMillis();
+        long startNanos = System.nanoTime();
         try {
             chain.doFilter(request, response);
         } finally {
-            long durationMs = System.currentTimeMillis() - start;
+            long durationMs = (System.nanoTime() - startNanos) / 1_000_000;
             int status = response.getStatus();
-
             String outcome = switch (status) {
-                case 200, 201, 204 -> "APPROVED";
-                case 429 -> "REJECTED (rate limit)";
-                case 401 -> "REJECTED (unauthorized)";
-                case 403 -> "REJECTED (forbidden)";
-                case 503 -> "REJECTED (service unavailable)";
-                default -> "STATUS_" + status;
+                case 200, 201, 202, 204 -> "ALLOWED";
+                case 400, 404, 405 -> "BAD_REQUEST";
+                case 401 -> "UNAUTHENTICATED";
+                case 403 -> "FORBIDDEN";
+                case 409 -> "CONFLICT";
+                case 429 -> "RATE_LIMITED";
+                case 503 -> "STORE_UNAVAILABLE";
+                default -> status >= 500 ? "ERROR" : "OTHER";
             };
-
-            log.info("ACCESS ip={} {} {} -> {} ({}ms) [{}]",
-                    clientIp, method, fullPath, outcome, durationMs, status);
+            // Bounded-cardinality by construction: no raw header, no query, no body.
+            log.info("access method={} path={} status={} outcome={} durationMs={} clientIp={}",
+                    method, path, status, outcome, durationMs, clientIp);
         }
-    }
-
-    private String resolveClientIp(HttpServletRequest request) {
-        String xff = request.getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isBlank()) {
-            return xff.split(",")[0].trim(); // first hop = original client
-        }
-        String xri = request.getHeader("X-Real-IP");
-        if (xri != null && !xri.isBlank()) {
-            return xri.trim();
-        }
-        return request.getRemoteAddr();
     }
 }

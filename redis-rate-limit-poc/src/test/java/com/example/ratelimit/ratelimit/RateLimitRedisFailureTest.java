@@ -9,6 +9,8 @@ import com.example.ratelimit.config.RateLimitProperties;
 import com.example.ratelimit.config.RateLimitProperties.FailureMode;
 import com.example.ratelimit.config.RateLimitProperties.Identity;
 import com.example.ratelimit.config.RateLimitProperties.Policy;
+import com.example.ratelimit.policy.PolicyEnforcer;
+import com.example.ratelimit.policy.PolicyMatcher;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.servlet.ServletException;
@@ -31,7 +33,8 @@ class RateLimitRedisFailureTest {
         var properties = new RateLimitProperties();
         properties.setOnRedisError(global);
         properties.setPolicies(policies);
-        return new RateLimitFilter(new RateLimitPolicyResolver(properties), store,
+        return new RateLimitFilter(
+                PolicyEnforcer.forExplicitPolicies(PolicyMatcher.fromYamlProperties(properties), store, global),
                 new RateLimitIdentityResolver(properties),
                 new RateLimitMetrics(new SimpleMeterRegistry()),
                 properties, new ObjectMapper(), Clock.systemUTC());
@@ -43,7 +46,8 @@ class RateLimitRedisFailureTest {
         properties.setEnabled(enabled);
         properties.setOnRedisError(global);
         properties.setPolicies(policies);
-        return new RateLimitFilter(new RateLimitPolicyResolver(properties), store,
+        return new RateLimitFilter(
+                PolicyEnforcer.forExplicitPolicies(PolicyMatcher.fromYamlProperties(properties), store, global),
                 new RateLimitIdentityResolver(properties),
                 new RateLimitMetrics(new SimpleMeterRegistry()),
                 properties, new ObjectMapper(), Clock.systemUTC());

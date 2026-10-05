@@ -1,0 +1,178 @@
+package com.example.ratelimit.policy;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import com.example.ratelimit.config.RateLimitProperties;
+import com.example.ratelimit.config.RateLimitProperties.FailureMode;
+import com.example.ratelimit.ratelimit.RateLimitDecision;
+import com.example.ratelimit.ratelimit.RateLimitStore;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+/**
+ * Enforces managed policies by delegating to the original atomic fixed-window store.
+ *
+ * <p>Reusing {@link RateLimitStore} rather than adding a second counter implementation is deliberate:
+ * the Lua script there is already proven by the concurrency and TTL tests, and duplicating it for the
+ * managed path would mean two implementations to keep correct. The managed store only decides
+ * <em>which</em> policies apply and with what identity; the store still decides whether to allow.
+ *
+ * <p><strong>Composition semantics in this phase are sequential, not all-or-nothing.</strong> Each
+ * matching policy is consumed in turn and the first denial is reported. If policy A allows and policy
+ * B then denies, A's counter has already been incremented. A genuinely atomic preflight-then-commit
+ * across several policies needs a single multi-key Lua script and a hash-tagged key layout, which is
+ * not in this phase. {@link Composition} exposes which policies were consulted and which one blocked so
+ * the response and the UI never imply stronger semantics than exist.
+ */
+@Component
+public class PolicyEnforcer {
+
+    /** Outcome of evaluating every policy that applied to one request. */
+    public record Composition(
+            List<PolicyDocument> consulted,
+            PolicyDocument blockedBy,
+            RateLimitDecision decision,
+            /** Policies consumed before the blocking one, whose quota was already spent. */
+            List<String> chargedBeforeBlock) {
+
+        public boolean allowed() {
+            return blockedBy == null;
+        }
+    }
+
+    private final PolicyMatcher matcher;
+    private final RateLimitStore store;
+    private final RateLimitProperties.FailureMode globalFailureMode;
+    /** Non-null only for unit tests that supply policies directly instead of via the managed store. */
+    private final List<PolicyDocument> explicitPolicies;
+
+    /**
+     * Production constructor, reading the managed policy set.
+     *
+     * <p>Marks the injection point explicitly: this class also has a private constructor for the
+     * explicit-policy test seam, and without this Spring sees more than one candidate and looks for a
+     * no-arg constructor that does not exist.
+     */
+    @Autowired
+    public PolicyEnforcer(PolicyMatcher matcher, RateLimitStore store, RateLimitProperties properties) {
+        this.matcher = matcher;
+        this.store = store;
+        this.globalFailureMode = properties.getOnRedisError();
+        this.explicitPolicies = null;
+    }
+
+    private PolicyEnforcer(List<PolicyDocument> policies, RateLimitStore store, FailureMode global) {
+        this.matcher = null;
+        this.store = store;
+        this.globalFailureMode = global;
+        this.explicitPolicies = List.copyOf(policies);
+    }
+
+    /**
+     * Enforcer over a fixed policy list, bypassing the managed store.
+     *
+     * <p>Exists so limiter unit tests can drive the filter with in-memory policies and a stub store.
+     * Production wiring always uses the managed-store constructor.
+     */
+    public static PolicyEnforcer forExplicitPolicies(List<PolicyDocument> policies, RateLimitStore store,
+            RateLimitProperties.FailureMode global) {
+        return new PolicyEnforcer(policies, store, global);
+    }
+
+    /** Policies that apply to this request, used by the filter to decide the governing scope. */
+    public List<PolicyDocument> applicablePolicies(String method, String path) {
+        return explicitPolicies != null ? select(explicitPolicies, method, path) : matcher.matching(method, path);
+    }
+
+    /**
+     * Route/global selection for a caller-supplied list, mirroring {@link PolicyMatcher#matching} so a
+     * test-driven enforcer behaves identically to the production one.
+     */
+    private static List<PolicyDocument> select(List<PolicyDocument> policies, String method, String path) {
+        var matcher = new org.springframework.util.AntPathMatcher();
+        var routeScoped = new ArrayList<PolicyDocument>();
+        var global = new ArrayList<PolicyDocument>();
+        for (PolicyDocument policy : policies) {
+            if (!policy.enabled()) {
+                continue;
+            }
+            if (policy.method() != null && !"ANY".equalsIgnoreCase(policy.method())
+                    && !policy.method().equalsIgnoreCase(method)) {
+                continue;
+            }
+            if (policy.scope() == Scope.GLOBAL || policy.path() == null || policy.path().isBlank()) {
+                global.add(policy);
+            } else if (matcher.match(policy.path(), path)) {
+                routeScoped.add(policy);
+            }
+        }
+        routeScoped.sort((a, b) -> Integer.compare(
+                b.path() == null ? 0 : b.path().length(),
+                a.path() == null ? 0 : a.path().length()));
+        var all = new ArrayList<PolicyDocument>(routeScoped);
+        all.addAll(global);
+        return all;
+    }
+
+    /**
+     * Evaluates every applicable policy for {@code method}/{@code path}.
+     *
+     * @param identityType identity scope name, e.g. {@code IP} or {@code USER}
+     * @param identityValue already-resolved, canonical identity
+     */
+    public Composition enforce(String method, String path, String identityType, String identityValue,
+            long nowMillis) {
+
+        List<PolicyDocument> applicable = applicablePolicies(method, path);
+        if (applicable.isEmpty()) {
+            return new Composition(List.of(), null, null, List.of());
+        }
+
+        var charged = new ArrayList<String>();
+        RateLimitDecision governing = null;
+        for (PolicyDocument policy : applicable) {
+            RateLimitDecision decision = store.consume(asStorePolicy(policy), identityType, identityValue,
+                    nowMillis);
+            if (governing == null) {
+                // Most specific policy first, so this is the one whose limit headers the client sees.
+                governing = decision;
+            }
+            if (!decision.allowed()) {
+                return new Composition(List.copyOf(applicable), policy, decision, List.copyOf(charged));
+            }
+            charged.add(policy.id());
+        }
+        // Allowed. The decision carries the governing policy's limit and remaining count, which the
+        // filter publishes as X-RateLimit-Limit / X-RateLimit-Remaining.
+        return new Composition(List.copyOf(applicable), null, governing, List.copyOf(charged));
+    }
+
+    /**
+     * Projects a managed policy onto the record the existing store understands.
+     *
+     * <p>Only {@link Algorithm#FIXED_WINDOW} can appear here: {@link PolicyDocument#validate()} refuses
+     * to store a policy selecting an unimplemented algorithm, so reaching this method with anything else
+     * would mean the store was written to directly, bypassing the admin API.
+     */
+    private static RateLimitProperties.Policy asStorePolicy(PolicyDocument policy) {
+        if (policy.algorithm() != Algorithm.FIXED_WINDOW) {
+            throw new IllegalStateException("policy " + policy.id() + " selects " + policy.algorithm()
+                    + ", which has no enforcing strategy in this phase");
+        }
+        RateLimitProperties.Identity identity = policy.scope() == Scope.USER
+                ? RateLimitProperties.Identity.USER
+                : RateLimitProperties.Identity.IP;
+        return new RateLimitProperties.Policy(policy.id(), policy.method(), policy.path(),
+                policy.limit(), policy.window(), identity, policy.onRedisError());
+    }
+
+    /** Projects a managed policy for the identity resolver. */
+    public RateLimitProperties.Policy storePolicy(PolicyDocument policy) {
+        return asStorePolicy(policy);
+    }
+
+    public RateLimitProperties.FailureMode failureModeFor(PolicyDocument policy) {
+        return policy.onRedisError() != null ? policy.onRedisError() : globalFailureMode;
+    }
+}

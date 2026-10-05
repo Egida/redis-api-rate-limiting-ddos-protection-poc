@@ -3,11 +3,13 @@ package com.example.ratelimit.ratelimit;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 import com.example.ratelimit.config.RateLimitProperties;
 import com.example.ratelimit.config.RateLimitProperties.FailureMode;
-import com.example.ratelimit.config.RateLimitProperties.Policy;
+import com.example.ratelimit.policy.PolicyDocument;
+import com.example.ratelimit.policy.PolicyEnforcer;
 import com.example.ratelimit.ratelimit.RateLimitIdentityResolver.Identity;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
@@ -23,16 +25,24 @@ import org.springframework.util.AntPathMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * Applies the resolved policy before the controller runs. Registered after Spring Security's filter
- * chain, so the {@code SecurityContext} is already populated when a {@code USER} identity is
- * resolved.
+ * Applies every policy that matches the request before the controller runs.
+ *
+ * <p>Registered after Spring Security's filter chain, so the {@code SecurityContext} is already
+ * populated when a USER identity resolves.
+ *
+ * <p>Policies come from {@link PolicyEnforcer}, which reads administrator-managed documents out of
+ * shared Redis. That is what makes an admin edit take effect on every instance without a restart. When
+ * the managed store is unreadable the matcher falls back to the {@code application.yml} baseline; see
+ * {@link PolicyMatcher} for why that fallback is necessary rather than merely convenient.
+ *
+ * <p>When several policies apply, all must allow. The first denial is reported, with the ids of the
+ * policies already consulted so a client can see which rule bound it.
  */
 public class RateLimitFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(RateLimitFilter.class);
 
-    private final RateLimitPolicyResolver policies;
-    private final RateLimitStore store;
+    private final PolicyEnforcer enforcer;
     private final RateLimitIdentityResolver identities;
     private final RateLimitMetrics metrics;
     private final RateLimitProperties properties;
@@ -40,11 +50,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
     private final Clock clock;
     private final AntPathMatcher matcher = new AntPathMatcher();
 
-    public RateLimitFilter(RateLimitPolicyResolver policies, RateLimitStore store,
-            RateLimitIdentityResolver identities, RateLimitMetrics metrics,
-            RateLimitProperties properties, ObjectMapper mapper, Clock clock) {
-        this.policies = policies;
-        this.store = store;
+    public RateLimitFilter(PolicyEnforcer enforcer, RateLimitIdentityResolver identities,
+            RateLimitMetrics metrics, RateLimitProperties properties, ObjectMapper mapper, Clock clock) {
+        this.enforcer = enforcer;
         this.identities = identities;
         this.metrics = metrics;
         this.properties = properties;
@@ -69,84 +77,111 @@ public class RateLimitFilter extends OncePerRequestFilter {
                 return true;
             }
         }
+        // The control plane is never rate limited: a throttled admin could not undo the policy that is
+        // throttling it.
+        if (path.startsWith("/api/admin/")) {
+            return true;
+        }
         return false;
     }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
             FilterChain chain) throws ServletException, IOException {
-        Policy policy = policies.resolve(request.getMethod(), request.getRequestURI());
-        if (policy == null) {
+
+        String method = request.getMethod();
+        String path = request.getRequestURI();
+
+        List<PolicyDocument> applicable = enforcer.applicablePolicies(method, path);
+        if (applicable.isEmpty()) {
             chain.doFilter(request, response);
             return;
         }
 
-        Identity identity = identities.resolve(request, policy);
-        RateLimitDecision decision;
+        // The governing scope decides the identity. IP is the safe default when a USER-scoped policy is
+        // reached without an authenticated principal, so an anonymous flood cannot bypass it.
+        Identity identity = identities.resolve(request, enforcer.storePolicy(applicable.get(0)));
+
+        PolicyEnforcer.Composition composition;
         try {
-            decision = store.consume(policy, identity.type(), identity.value(), clock.millis());
+            composition = enforcer.enforce(method, path, identity.type(), identity.value(), clock.millis());
         } catch (RateLimitStore.RateLimitStoreUnavailableException e) {
-            metrics.record(RateLimitMetrics.Outcome.ERROR, policy.id(), identity.type());
-            log.warn("rate limit store unavailable for policy {}", policy.id(), e);
-            if (policy.failureMode(properties.getOnRedisError()) == FailureMode.FAIL_CLOSED) {
-                writeStoreUnavailable(response, request, policy);
+            PolicyDocument governing = applicable.get(0);
+            metrics.record(RateLimitMetrics.Outcome.ERROR, governing.id(), identity.type());
+            log.warn("rate limit store unavailable for policy {}", governing.id(), e);
+            if (enforcer.failureModeFor(governing) == FailureMode.FAIL_CLOSED) {
+                writeStoreUnavailable(response, request, governing);
                 return;
             }
-            // FAIL_OPEN: fall through to normal application handling.
             chain.doFilter(request, response);
             return;
         }
 
-        if (decision.allowed()) {
-            metrics.record(RateLimitMetrics.Outcome.ALLOWED, policy.id(), identity.type());
-            response.setHeader("X-RateLimit-Limit", String.valueOf(decision.limit()));
-            response.setHeader("X-RateLimit-Remaining", String.valueOf(decision.remaining()));
+        PolicyDocument blocked = composition.blockedBy();
+        if (blocked == null) {
+            metrics.record(RateLimitMetrics.Outcome.ALLOWED, composition.consulted().get(0).id(), identity.type());
+            if (composition.decision() != null) {
+                response.setHeader("X-RateLimit-Limit", String.valueOf(composition.decision().limit()));
+                response.setHeader("X-RateLimit-Remaining", String.valueOf(composition.decision().remaining()));
+            }
+            if (composition.consulted().size() > 1) {
+                // Make AND-composition observable to the client without leaking anything sensitive.
+                response.setHeader("X-RateLimit-Policies",
+                        composition.consulted().stream().map(PolicyDocument::id).toList().toString());
+            }
             chain.doFilter(request, response);
             return;
         }
 
-        metrics.record(RateLimitMetrics.Outcome.REJECTED, policy.id(), identity.type());
-        writeRateLimited(response, request, policy, decision);
+        metrics.record(RateLimitMetrics.Outcome.REJECTED, blocked.id(), identity.type());
+        writeRateLimited(response, request, blocked, composition, identity.type());
     }
 
-    private void writeRateLimited(HttpServletResponse response, HttpServletRequest request, Policy policy,
-            RateLimitDecision decision) throws IOException {
-        long retryAfterSeconds = decision.retryAfter().toSeconds();
+    private void writeRateLimited(HttpServletResponse response, HttpServletRequest request, PolicyDocument policy,
+            PolicyEnforcer.Composition composition, String identityType) throws IOException {
+        long retryAfterSeconds = composition.decision().retryAfter().toSeconds();
         response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.setHeader("X-RateLimit-Policy", policy.id());
-        response.setHeader("X-RateLimit-Limit", String.valueOf(decision.limit()));
+        response.setHeader("X-RateLimit-Limit", String.valueOf(composition.decision().limit()));
         response.setHeader("X-RateLimit-Remaining", "0");
         response.setHeader(HttpHeaders.RETRY_AFTER, String.valueOf(retryAfterSeconds));
-        writeBody(response, HttpStatus.TOO_MANY_REQUESTS,
-                "Rate limit exceeded for this route. Retry after " + retryAfterSeconds + "s.",
-                request, policy, retryAfterSeconds);
+
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("timestamp", Instant.now(clock).toString());
+        body.put("status", HttpStatus.TOO_MANY_REQUESTS.value());
+        body.put("error", HttpStatus.TOO_MANY_REQUESTS.getReasonPhrase());
+        body.put("message", "Rate limit exceeded for this route. Retry after " + retryAfterSeconds + "s.");
+        body.put("path", request.getRequestURI());
+        body.put("policy", policy.id());
+        body.put("algorithm", policy.algorithm() == null ? null : policy.algorithm().name());
+        body.put("scope", policy.scope() == null ? null : policy.scope().name());
+        body.put("limit", composition.decision().limit());
+        body.put("windowSeconds", policy.window() == null ? null : policy.window().toSeconds());
+        body.put("retryAfterSeconds", retryAfterSeconds);
+        body.put("consultedPolicies",
+                composition.consulted().stream().map(PolicyDocument::id).toList());
+        if (!composition.chargedBeforeBlock().isEmpty()) {
+            // Stated plainly rather than implying all-or-nothing charging.
+            body.put("chargedBeforeBlock", composition.chargedBeforeBlock());
+        }
+        mapper.writeValue(response.getOutputStream(), body);
     }
 
     /** No quota was counted, so no X-RateLimit-Limit/Remaining headers are emitted here. */
-    private void writeStoreUnavailable(HttpServletResponse response, HttpServletRequest request, Policy policy)
+    private void writeStoreUnavailable(HttpServletResponse response, HttpServletRequest request, PolicyDocument policy)
             throws IOException {
         response.setStatus(HttpStatus.SERVICE_UNAVAILABLE.value());
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.setHeader("X-RateLimit-Policy", policy.id());
         response.setHeader(HttpHeaders.RETRY_AFTER, "5");
-        writeBody(response, HttpStatus.SERVICE_UNAVAILABLE,
-                "Rate limiting is temporarily unavailable. Please retry later.",
-                request, policy, 5);
-    }
-
-    private void writeBody(HttpServletResponse response, HttpStatus status, String message,
-            HttpServletRequest request, Policy policy, long retryAfterSeconds) throws IOException {
-        Map<String, Object> body = Map.of(
+        mapper.writeValue(response.getOutputStream(), Map.of(
                 "timestamp", Instant.now(clock).toString(),
-                "status", status.value(),
-                "error", status.getReasonPhrase(),
-                "message", message,
+                "status", HttpStatus.SERVICE_UNAVAILABLE.value(),
+                "error", HttpStatus.SERVICE_UNAVAILABLE.getReasonPhrase(),
+                "message", "Rate limiting is temporarily unavailable. Please retry later.",
                 "path", request.getRequestURI(),
                 "policy", policy.id(),
-                "limit", policy.limit(),
-                "windowSeconds", policy.window().toSeconds(),
-                "retryAfterSeconds", retryAfterSeconds);
-        mapper.writeValue(response.getOutputStream(), body);
+                "retryAfterSeconds", 5));
     }
 }

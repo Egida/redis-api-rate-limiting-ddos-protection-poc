@@ -28,8 +28,13 @@ management:
 logging:
   level:
     com.example.ratelimit: INFO
-    org.apache.catalina.connector.CoyoteAdapter: DEBUG
-    org.apache.coyote.http11.Http11InputBuffer: DEBUG
+    # Tomcat/coyote header DEBUG is deliberately OFF. It prints Authorization,
+    # Cookie and query values verbatim, which would write HTTP Basic credentials
+    # and session cookies to backend.log in plaintext. AccessLogFilter already emits
+    # a structured line per request with method, route template, outcome and latency,
+    # so nothing is lost by leaving this at INFO.
+    org.apache.catalina.connector.CoyoteAdapter: INFO
+    org.apache.coyote.http11.Http11InputBuffer: INFO
 
 rate-limit:
   enabled: true
@@ -37,6 +42,13 @@ rate-limit:
   # Empty means X-Forwarded-For / X-Real-IP are ignored entirely and the socket peer is used.
   # Populate only with the CIDRs of reverse proxies you actually operate, e.g. ["10.0.0.0/8"].
   trusted-proxies: []
+  # Administrator for /api/admin/**. No default: leave these unset and the control plane rejects
+  # every caller. Supply them from the environment, never in this file:
+  #   RATELIMIT_ADMIN_USER / RATELIMIT_ADMIN_PASSWORD
+  admin:
+    username: ${RATELIMIT_ADMIN_USER:}
+    password: ${RATELIMIT_ADMIN_PASSWORD:}
+    raw-password: true
   # Used when Redis is unreachable; individual policies may override.
   on-redis-error: fail_open
   ttl-grace: 1s

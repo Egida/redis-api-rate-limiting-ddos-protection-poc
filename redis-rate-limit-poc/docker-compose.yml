@@ -4,7 +4,18 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ratelimit-poc-redis
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # AOF is enabled and the appendonly directory lives on a named volume, so administrator-managed
+    # policies (ratelimit:policy:v1:*) survive a container or app restart. The previous setting
+    # (--appendonly no) discarded everything on exit, which would silently reset every policy edit.
+    #
+    #   docker compose up -d
+    #   docker compose down          # container goes, volume and policies survive
+    #   docker compose down -v       # DESTROYS the volume and every policy
+    #
+    # Rate counters also survive, but they carry a TTL of one window, so they age out on their own.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - ratelimit-redis-data:/data
     ports:
       - "6379:6379"
     healthcheck:
@@ -12,3 +23,6 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
+volumes:
+  ratelimit-redis-data:
