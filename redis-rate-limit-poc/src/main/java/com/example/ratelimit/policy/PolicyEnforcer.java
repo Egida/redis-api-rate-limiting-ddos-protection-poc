@@ -18,23 +18,24 @@ import org.springframework.stereotype.Component;
  * managed path would mean two implementations to keep correct. The managed store only decides
  * <em>which</em> policies apply and with what identity; the store still decides whether to allow.
  *
- * <p><strong>Composition semantics in this phase are sequential, not all-or-nothing.</strong> Each
- * matching policy is consumed in turn and the first denial is reported. If policy A allows and policy
- * B then denies, A's counter has already been incremented. A genuinely atomic preflight-then-commit
- * across several policies needs a single multi-key Lua script and a hash-tagged key layout, which is
- * not in this phase. {@link Composition} exposes which policies were consulted and which one blocked so
- * the response and the UI never imply stronger semantics than exist.
+ * <p><strong>Composition is preflight-then-commit.</strong> Every applicable policy is peeked without
+ * spending quota; only if all peeks allow are the policies consumed. A preflight denial therefore leaves
+ * earlier policies uncharged. The remaining race is between a successful preflight and the commit: a
+ * concurrent request can take the last unit first, so the commit may reject after earlier commits have
+ * already incremented. That bias is toward rejecting, never toward over-admitting.
  */
 @Component
 public class PolicyEnforcer {
+
+    /** One applicable policy together with the already-resolved identity it must be charged against. */
+    public record ResolvedPolicy(PolicyDocument policy, String identityType, String identityValue) {
+    }
 
     /** Outcome of evaluating every policy that applied to one request. */
     public record Composition(
             List<PolicyDocument> consulted,
             PolicyDocument blockedBy,
-            RateLimitDecision decision,
-            /** Policies consumed before the blocking one, whose quota was already spent. */
-            List<String> chargedBeforeBlock) {
+            RateLimitDecision decision) {
 
         public boolean allowed() {
             return blockedBy == null;
@@ -116,36 +117,42 @@ public class PolicyEnforcer {
     }
 
     /**
-     * Evaluates every applicable policy for {@code method}/{@code path}.
+     * Evaluates already-resolved policies.
      *
-     * @param identityType identity scope name, e.g. {@code IP} or {@code USER}
-     * @param identityValue already-resolved, canonical identity
+     * <p>Preflight first: every policy is peeked without charging. If any peek denies, nothing has been
+     * consumed and that denial is returned. Only when all peeks allow are the policies committed in
+     * order. A commit can still reject if a concurrent request spent the last unit after the preflight;
+     * that race is safe but not free, and it is documented rather than hidden.
      */
-    public Composition enforce(String method, String path, String identityType, String identityValue,
-            long nowMillis) {
-
-        List<PolicyDocument> applicable = applicablePolicies(method, path);
-        if (applicable.isEmpty()) {
-            return new Composition(List.of(), null, null, List.of());
+    public Composition enforceResolved(List<ResolvedPolicy> resolved, long nowMillis) {
+        if (resolved.isEmpty()) {
+            return new Composition(List.of(), null, null);
         }
 
-        var charged = new ArrayList<String>();
+        List<PolicyDocument> consulted = resolved.stream().map(ResolvedPolicy::policy).toList();
+        for (ResolvedPolicy candidate : resolved) {
+            RateLimitDecision preflight = store.peek(asStorePolicy(candidate.policy()),
+                    candidate.identityType(), candidate.identityValue(), nowMillis);
+            if (!preflight.allowed()) {
+                return new Composition(consulted, candidate.policy(), preflight);
+            }
+        }
+
         RateLimitDecision governing = null;
-        for (PolicyDocument policy : applicable) {
-            RateLimitDecision decision = store.consume(asStorePolicy(policy), identityType, identityValue,
-                    nowMillis);
+        for (ResolvedPolicy candidate : resolved) {
+            RateLimitDecision decision = store.consume(asStorePolicy(candidate.policy()),
+                    candidate.identityType(), candidate.identityValue(), nowMillis);
             if (governing == null) {
                 // Most specific policy first, so this is the one whose limit headers the client sees.
                 governing = decision;
             }
             if (!decision.allowed()) {
-                return new Composition(List.copyOf(applicable), policy, decision, List.copyOf(charged));
+                return new Composition(consulted, candidate.policy(), decision);
             }
-            charged.add(policy.id());
         }
         // Allowed. The decision carries the governing policy's limit and remaining count, which the
         // filter publishes as X-RateLimit-Limit / X-RateLimit-Remaining.
-        return new Composition(List.copyOf(applicable), null, governing, List.copyOf(charged));
+        return new Composition(consulted, null, governing);
     }
 
     /**

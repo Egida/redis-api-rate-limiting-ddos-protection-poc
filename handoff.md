@@ -64,7 +64,7 @@ bookkeeping.** Two separate JVMs, one Redis, one counter.
 │   │       ├── PocMetadataController.java          GET /api/poc/policies for the console
 │   │       └── SecurityConfig.java                 in-memory users, HTTP Basic, /api/orders guarded
 │   ├── src/main/resources/application.yml          all rate-limit configuration
-│   ├── src/test/java/…                             8 test classes, 63 tests
+│   ├── src/test/java/…                             10 test classes, 86 tests
 │   ├── scripts/  verify-all.ps1 · load-demo.ps1 · two-instance-demo.ps1 · lib/timing.ps1
 │   ├── docs/api-rate-limiting-poc.md               553-line design document
 │   └── README.md                                   backend-specific commands
@@ -141,14 +141,14 @@ Defined in exactly one method. The raw request path is never used, so path param
 into keys. The window index is `floor(nowMillis / windowMillis)` and keeps consecutive windows from
 bleeding into one another.
 
-### Request flow — `RateLimitFilter.java:76-110`
+### Request flow — `RateLimitFilter.java`, `PolicyEnforcer.java`
 
-1. `shouldNotFilter` — skip if the global kill switch is off, or the method/path is excluded.
-2. `policies.resolve(method, uri)` — no match means **no limit at all**, the chain proceeds.
-3. `identities.resolve(request, policy)` — the **policy's** strategy decides, not who is logged in.
-4. `store.consume(...)` — may throw `RateLimitStoreUnavailableException`.
-5. Allow → set `X-RateLimit-Limit` / `X-RateLimit-Remaining`, continue.
-6. Reject → record the metric, write 429 with headers and a JSON body.
+1. `shouldNotFilter` — skip if the global kill switch is off, the method/path is excluded, or the path is `/api/admin/`.
+2. `enforcer.applicablePolicies(method, uri)` — no match means **no limit at all**, the chain proceeds.
+3. Resolve identity **per policy**: USER uses the authenticated principal with IP fallback; GLOBAL uses the constant `global`; other scopes use the gated client IP.
+4. `enforcer.enforceResolved(...)` — peek every applicable policy without spending quota; if all allow, commit them in order.
+5. Allow → set `X-RateLimit-Limit` / `X-RateLimit-Remaining` from the governing policy, continue.
+6. Reject → record the metric, write 429 with headers and a JSON body naming every consulted policy. A preflight denial spends no quota; a commit-time race can still reject after earlier commits, and that bias is toward rejecting, never over-admitting.
 
 ### Identity — `RateLimitIdentityResolver.java:50-60`
 
@@ -271,39 +271,33 @@ and a test asserts it.
 Every HTTP request is logged to `redis-rate-limit-poc/logs/backend.log` with:
 
 ```
-ACCESS ip=0:0:0:0:0:0:0:1 POST /api/login -> REJECTED (rate limit) (6ms) [429]
-ACCESS ip=0:0:0:0:0:0:0:1 GET /api/products -> APPROVED (5ms) [200]
+access method=POST path=/api/login status=429 outcome=RATE_LIMITED durationMs=6 clientIp=0:0:0:0:0:0:0:1
+access method=GET path=/api/products status=200 outcome=ALLOWED durationMs=5 clientIp=0:0:0:0:0:0:0:1
 ```
 
-**Fields:** client IP (from `X-Forwarded-For` / `X-Real-IP` / remote addr), HTTP method, full path + query, outcome, latency, HTTP status.
+**Fields:** HTTP method, request path **without the query string**, status, outcome, latency, and client IP. The query string, `Authorization`, `Cookie`, and header values are never logged.
 
-**Outcomes:**
-- `APPROVED` — 2xx
-- `REJECTED (rate limit)` — 429
-- `REJECTED (unauthorized)` — 401
-- `REJECTED (forbidden)` — 403
-- `REJECTED (service unavailable)` — 503
-- `STATUS_<code>` — anything else
+**Outcomes:** `ALLOWED`, `BAD_REQUEST`, `UNAUTHENTICATED`, `FORBIDDEN`, `CONFLICT`, `RATE_LIMITED`, `STORE_UNAVAILABLE`, `ERROR`, `OTHER`.
 
 **Filter ordering:** AccessLogFilter runs at `LOWEST_PRECEDENCE - 150` (before RateLimitFilter at `-100`) so it wraps the entire chain and sees the final status even when RateLimitFilter short-circuits on 429/503.
 
-**Tomcat DEBUG logging** is also enabled via `application.yml`:
-- `org.apache.catalina.connector.CoyoteAdapter: DEBUG` — request line + headers
-- `org.apache.coyote.http11.Http11InputBuffer: DEBUG` — response headers
+**Tomcat/coyote header DEBUG is deliberately off.** It would print `Authorization` and `Cookie` verbatim, writing credentials to `backend.log` in plaintext. `application.yml` leaves those loggers at `INFO`; the structured access line above is the request record.
 
 ---
 
-## 6. Tests — 63 JVM tests across 8 classes
+## 6. Tests — 86 JVM tests across 10 classes
 
 | File | @Test | What it establishes |
 |---|---|---|
+| `PolicyAdminControllerTest` | 10 | Admin boundary: anonymous 401, demo USER 403, admin CRUD lifecycle, stale version 409, invalid policy 400, unimplemented algorithm refused, audit without secrets |
+| `ManagedPolicyStoreTest` | 12 | Redis round trip, policy/counter namespacing, create refusal, stale-version conflict, version advance, concurrent-save winner, delete, audit, seed/reset, validation |
 | `RateLimitIdentityResolverTest` | 25 | IPv4 spelling canonicalisation, XFF right-to-left walk, forged leftmost prefix, multi-hop, all-trusted, untrusted peer, IPv6 |
-| `RateLimitHttpIntegrationTest` | 10 | Below-limit passes, beyond-limit 429 with retry info, per-user isolation, authenticated route limits by user not IP, 401 is not rate-limited, excluded routes pass, bounded metric labels |
+| `RateLimitHttpIntegrationTest` | 7 | Below-limit passes, beyond-limit 429 with retry info, per-user isolation, authenticated route limits by user not IP, 401 is not rate-limited, excluded routes pass, bounded metric labels |
 | `RateLimitRedisFailureTest` | 9 | Fail-closed 503, fail-open passes, global default applies, kill switch skips the store, unlisted route uncounted, fail-closed makes no quota claim, most-specific policy wins, duplicate id fails startup |
 | `RateLimitConfigurationValidationTest` | 6 | Config binding and validation |
 | `RedisRateLimitStoreTest` | 6 | Allow-then-reject, identities independent, policies independent, TTL set and key gone after window, key shape, `twoStoreInstancesShareOneLimit` |
 | `PocMetadataControllerTest` | 6 | `/api/poc/policies` contract; asserts `/index.html` → 404 |
-| `RateLimitWindowBoundaryTest` | 3 | Fresh quota every window, Retry-After reflects real time left, keys carry policy and hashed identity |
+| `RateLimitWindowBoundaryTest` | 4 | Fresh quota every window, Retry-After reflects real time left, keys carry policy and hashed identity, preflight denial charges nothing |
 | `RateLimitConcurrencyTest` | 1 | `exactAllowanceUnderParallelLoad` |
 
 `RedisTestSupport` provides a Testcontainers `redis:7-alpine`. **The fixed-window logic is tested
@@ -334,7 +328,7 @@ Measured in this environment, not quoted from anywhere.
 
 | Command | Result |
 |---|---|
-| `mvn -B clean verify` | Tests run 63, Failures 0, Errors 0 — BUILD SUCCESS 47.7 s |
+| `mvn -B -o clean test` | Tests run 86, Failures 0, Errors 0 — BUILD SUCCESS |
 | `npm test` | 5 suites, 25/25 passed, 4.46 s |
 | `npm run build` | Initial 244.44 kB, Transfer 66.15 kB, bundle 4.847 s |
 | `verify-all.ps1 -SkipBuild -SkipUnitTests` | 133.50 s, every step OK |
@@ -414,7 +408,7 @@ Verified against the live DOM: title `RateGuard - API Protection Console`, Redis
 | `43272c5` | Initial commit — 83 files |
 | `b890e73` | Markdown report + README doc-map link |
 | see `git log` | Angular 22 version correction across README, Markdown report, HTML report, regenerated PDF |
-| **uncommitted** | AccessLogFilter + Tomcat DEBUG logging (this session) |
+| **uncommitted** | Multi-policy preflight/commit composition, per-policy identity, read-only fixed-window peek, and security/doc corrections |
 
 ### The Angular version error, and the fix
 
@@ -431,9 +425,9 @@ node "$env:TEMP\opencode\make-pdf.cjs"        # HTML → PDF, logs every image's
 node "$env:TEMP\opencode\check-layout.cjs"    # fails if any block exceeds the 263mm page height
 ```
 
-### Access logging (this session)
+### Access logging corrections
 
-Added `AccessLogFilter.java` and registered it in `RateLimitConfiguration.java` before the rate limit filter. Enabled Tomcat DEBUG logging for request/response headers via `application.yml`. Log file: `redis-rate-limit-poc/logs/backend.log`. See §5.5.
+`AccessLogFilter.java` now logs path only, never the query string, and resolves client IP through the trusted-proxy-gated resolver. Tomcat/coyote header DEBUG was removed from `application.yml` because it could write `Authorization` and cookies in plaintext. Log file: `redis-rate-limit-poc/logs/backend.log`. See §5.5.
 
 ---
 
@@ -586,7 +580,7 @@ The brief this POC answers has 11 scope items and 16 acceptance criteria. All ar
 | 12 | Documented key convention | `RedisRateLimitStore:95`, design doc §4 |
 | 13 | Allowed/rejected statistics | `ratelimit.requests` counter, tagged by outcome |
 | 14 | Redis failure handled | per-policy fail-open/closed, 503 on fail-closed |
-| 15 | Six required test classes | 63 tests — see §6 |
+| 15 | Six required test classes | 86 tests across 10 classes — see §6 |
 | 16 | Eight documentation topics | design doc 15 sections + README + 3 report formats |
 
 **Sample limits match the brief exactly:** `GET /api/products` 100/min/IP,

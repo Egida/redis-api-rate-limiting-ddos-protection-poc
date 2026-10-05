@@ -40,6 +40,16 @@ public class RedisRateLimitStore implements RateLimitStore {
             return {count, ttl}
             """, List.class);
 
+    /** Read-only counterpart: returns {count, pttlMillis} without creating or changing quota state. */
+    private static final RedisScript<List> PEEK = new DefaultRedisScript<>("""
+            local raw = redis.call('GET', KEYS[1])
+            local count = 0
+            if raw then
+              count = tonumber(raw)
+            end
+            return {count, redis.call('PTTL', KEYS[1])}
+            """, List.class);
+
     private final StringRedisTemplate redis;
     private final String keyPrefix;
     private final Duration ttlGrace;
@@ -69,6 +79,35 @@ public class RedisRateLimitStore implements RateLimitStore {
             }
             // Retry-After comes from the live TTL, so it always covers the rest of the real window.
             long retryAfter = Math.max(1, Math.ceilDiv(result.get(1), 1000));
+            return RateLimitDecision.reject(policy.limit(), Duration.ofSeconds(retryAfter));
+        } catch (DataAccessException e) {
+            throw new RateLimitStoreUnavailableException("redis unavailable", e);
+        }
+    }
+
+    @Override
+    public RateLimitDecision peek(Policy policy, String identityType, String identity, long nowMillis) {
+        long windowMillis = policy.window().toMillis();
+        long elapsed = Math.floorMod(nowMillis, windowMillis);
+        long expectedTtlMillis = (windowMillis - elapsed) + ttlGrace.toMillis();
+        String key = key(policy, identityType, identity, nowMillis);
+
+        try {
+            @SuppressWarnings("unchecked")
+            List<Long> result = redis.execute(PEEK, List.of(key));
+            if (result == null || result.size() < 2 || result.get(0) == null || result.get(1) == null) {
+                throw new RateLimitStoreUnavailableException("redis returned no peek for " + key, null);
+            }
+            long count = result.get(0);
+            long ttl = result.get(1);
+            if (ttl == -2) {
+                return RateLimitDecision.allow(policy.limit(), policy.limit());
+            }
+            if (count < policy.limit()) {
+                return RateLimitDecision.allow(policy.limit(), (int) Math.max(0, policy.limit() - count));
+            }
+            long effectiveTtl = ttl >= 0 ? ttl : expectedTtlMillis;
+            long retryAfter = Math.max(1, Math.ceilDiv(effectiveTtl, 1000));
             return RateLimitDecision.reject(policy.limit(), Duration.ofSeconds(retryAfter));
         } catch (DataAccessException e) {
             throw new RateLimitStoreUnavailableException("redis unavailable", e);

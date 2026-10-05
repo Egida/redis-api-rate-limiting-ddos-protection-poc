@@ -3,6 +3,7 @@ package com.example.ratelimit.ratelimit;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -10,6 +11,7 @@ import com.example.ratelimit.config.RateLimitProperties;
 import com.example.ratelimit.config.RateLimitProperties.FailureMode;
 import com.example.ratelimit.policy.PolicyDocument;
 import com.example.ratelimit.policy.PolicyEnforcer;
+import com.example.ratelimit.policy.Scope;
 import com.example.ratelimit.ratelimit.RateLimitIdentityResolver.Identity;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
@@ -98,16 +100,25 @@ public class RateLimitFilter extends OncePerRequestFilter {
             return;
         }
 
-        // The governing scope decides the identity. IP is the safe default when a USER-scoped policy is
-        // reached without an authenticated principal, so an anonymous flood cannot bypass it.
-        Identity identity = identities.resolve(request, enforcer.storePolicy(applicable.get(0)));
+        // Each policy uses its own scope's identity. USER falls back to IP when unauthenticated, so an
+        // anonymous flood cannot bypass a user-scoped rule; GLOBAL uses one constant identity.
+        var resolved = new ArrayList<PolicyEnforcer.ResolvedPolicy>(applicable.size());
+        for (PolicyDocument policy : applicable) {
+            if (policy.scope() == Scope.GLOBAL) {
+                resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, Scope.GLOBAL.name(), "global"));
+            } else {
+                Identity identity = identities.resolve(request, enforcer.storePolicy(policy));
+                resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, identity.type(), identity.value()));
+            }
+        }
 
         PolicyEnforcer.Composition composition;
         try {
-            composition = enforcer.enforce(method, path, identity.type(), identity.value(), clock.millis());
+            composition = enforcer.enforceResolved(resolved, clock.millis());
         } catch (RateLimitStore.RateLimitStoreUnavailableException e) {
             PolicyDocument governing = applicable.get(0);
-            metrics.record(RateLimitMetrics.Outcome.ERROR, governing.id(), identity.type());
+            String outcomeIdentity = identityTypeFor(resolved, governing.id());
+            metrics.record(RateLimitMetrics.Outcome.ERROR, governing.id(), outcomeIdentity);
             log.warn("rate limit store unavailable for policy {}", governing.id(), e);
             if (enforcer.failureModeFor(governing) == FailureMode.FAIL_CLOSED) {
                 writeStoreUnavailable(response, request, governing);
@@ -119,7 +130,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
         PolicyDocument blocked = composition.blockedBy();
         if (blocked == null) {
-            metrics.record(RateLimitMetrics.Outcome.ALLOWED, composition.consulted().get(0).id(), identity.type());
+            PolicyDocument governing = composition.consulted().get(0);
+            String outcomeIdentity = identityTypeFor(resolved, governing.id());
+            metrics.record(RateLimitMetrics.Outcome.ALLOWED, governing.id(), outcomeIdentity);
             if (composition.decision() != null) {
                 response.setHeader("X-RateLimit-Limit", String.valueOf(composition.decision().limit()));
                 response.setHeader("X-RateLimit-Remaining", String.valueOf(composition.decision().remaining()));
@@ -133,12 +146,22 @@ public class RateLimitFilter extends OncePerRequestFilter {
             return;
         }
 
-        metrics.record(RateLimitMetrics.Outcome.REJECTED, blocked.id(), identity.type());
-        writeRateLimited(response, request, blocked, composition, identity.type());
+        String outcomeIdentity = identityTypeFor(resolved, blocked.id());
+        metrics.record(RateLimitMetrics.Outcome.REJECTED, blocked.id(), outcomeIdentity);
+        writeRateLimited(response, request, blocked, composition);
+    }
+
+    private static String identityTypeFor(List<PolicyEnforcer.ResolvedPolicy> resolved, String policyId) {
+        for (PolicyEnforcer.ResolvedPolicy candidate : resolved) {
+            if (candidate.policy().id().equals(policyId)) {
+                return candidate.identityType();
+            }
+        }
+        return RateLimitProperties.Identity.IP.name();
     }
 
     private void writeRateLimited(HttpServletResponse response, HttpServletRequest request, PolicyDocument policy,
-            PolicyEnforcer.Composition composition, String identityType) throws IOException {
+            PolicyEnforcer.Composition composition) throws IOException {
         long retryAfterSeconds = composition.decision().retryAfter().toSeconds();
         response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
@@ -161,10 +184,6 @@ public class RateLimitFilter extends OncePerRequestFilter {
         body.put("retryAfterSeconds", retryAfterSeconds);
         body.put("consultedPolicies",
                 composition.consulted().stream().map(PolicyDocument::id).toList());
-        if (!composition.chargedBeforeBlock().isEmpty()) {
-            // Stated plainly rather than implying all-or-nothing charging.
-            body.put("chargedBeforeBlock", composition.chargedBeforeBlock());
-        }
         mapper.writeValue(response.getOutputStream(), body);
     }
 

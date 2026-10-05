@@ -54,8 +54,16 @@ class RateLimitRedisFailureTest {
     }
 
     private static RateLimitStore alwaysFails() {
-        return (policy, type, identity, now) -> {
-            throw new RateLimitStore.RateLimitStoreUnavailableException("simulated outage", null);
+        return new RateLimitStore() {
+            @Override
+            public RateLimitDecision consume(Policy policy, String type, String identity, long now) {
+                throw new RateLimitStore.RateLimitStoreUnavailableException("simulated outage", null);
+            }
+
+            @Override
+            public RateLimitDecision peek(Policy policy, String type, String identity, long now) {
+                throw new RateLimitStore.RateLimitStoreUnavailableException("simulated outage", null);
+            }
         };
     }
 
@@ -160,6 +168,11 @@ class RateLimitRedisFailureTest {
         public RateLimitDecision consume(Policy policy, String identityType, String identity, long now) {
             calls++;
             return RateLimitDecision.allow(policy.limit(), policy.limit() - 1);
+        }
+
+        @Override
+        public RateLimitDecision peek(Policy policy, String identityType, String identity, long now) {
+            return RateLimitDecision.allow(policy.limit(), policy.limit());
         }
     }
 }

@@ -84,9 +84,31 @@ class RateLimitWindowBoundaryTest {
         assertThat(store.lastKey).doesNotContain("203.0.113.1");
     }
 
+    @Test
+    void deniedPreflightDoesNotChargeEarlierPolicies() throws Exception {
+        var first = new Policy("boundary-first", "GET", "/api/boundary", 2,
+                Duration.ofMinutes(1), Identity.IP, null);
+        var second = new Policy("boundary-second", "GET", "/api/boundary", 1,
+                Duration.ofMinutes(1), Identity.IP, null);
+        var filter = filter(List.of(first, second));
+
+        assertThat(get(filter, T0, "203.0.113.7").getStatus()).isEqualTo(200);
+        assertThat(store.consumes).isEqualTo(2);
+
+        // The second policy is already exhausted, so its preflight denies before either policy commits.
+        assertThat(get(filter, T0 + 1_000, "203.0.113.7").getStatus()).isEqualTo(429);
+        assertThat(store.consumes)
+                .as("a preflight denial must not spend quota in earlier policies")
+                .isEqualTo(2);
+    }
+
     private RateLimitFilter filter() {
+        return filter(List.of(POLICY));
+    }
+
+    private RateLimitFilter filter(List<Policy> policies) {
         var properties = new RateLimitProperties();
-        properties.setPolicies(List.of(POLICY));
+        properties.setPolicies(policies);
         var clock = new Clock() {
             @Override
             public ZoneId getZone() {
@@ -131,6 +153,7 @@ class RateLimitWindowBoundaryTest {
         private final Map<String, List<String>> keysByIdentity = new HashMap<>();
         String lastKey = "";
         String lastIdentity = "";
+        int consumes = 0;
 
         List<String> keysFor(String identity) {
             return keysByIdentity.getOrDefault(RedisRateLimitStore.hash(identity), List.of());
@@ -150,7 +173,22 @@ class RateLimitWindowBoundaryTest {
             }
 
             int count = counts.merge(key, 1, Integer::sum);
+            consumes++;
             if (count <= policy.limit()) {
+                return RateLimitDecision.allow(policy.limit(), policy.limit() - count);
+            }
+            long retryAfter = Math.max(1, Math.ceilDiv(windowMillis - elapsed, 1000));
+            return RateLimitDecision.reject(policy.limit(), Duration.ofSeconds(retryAfter));
+        }
+
+        @Override
+        public RateLimitDecision peek(Policy policy, String identityType, String identity, long nowMillis) {
+            long windowMillis = policy.window().toMillis();
+            long elapsed = Math.floorMod(nowMillis, windowMillis);
+            String key = "%s:%s:%s:%d".formatted(policy.id(), identityType.toLowerCase(),
+                    RedisRateLimitStore.hash(identity), Math.floorDiv(nowMillis, windowMillis));
+            int count = counts.getOrDefault(key, 0);
+            if (count < policy.limit()) {
                 return RateLimitDecision.allow(policy.limit(), policy.limit() - count);
             }
             long retryAfter = Math.max(1, Math.ceilDiv(windowMillis - elapsed, 1000));
