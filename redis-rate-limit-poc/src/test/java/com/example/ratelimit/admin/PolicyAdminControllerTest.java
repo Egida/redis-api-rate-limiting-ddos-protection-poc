@@ -253,4 +253,25 @@ class PolicyAdminControllerTest {
                 new HttpEntity<>(admin()), String.class);
         assertThat(response.getBody()).contains("\"algorithmImplemented\":true");
     }
+
+    @Test
+    void capabilitiesDescribeOnlyWhatIsEnforced() {
+        ResponseEntity<String> response = rest.exchange("/api/admin/rate-limit/capabilities", HttpMethod.GET,
+                new HttpEntity<>(admin()), String.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).contains("\"name\":\"FIXED_WINDOW\",\"implemented\":true");
+        assertThat(response.getBody()).contains("\"name\":\"TOKEN_BUCKET\",\"implemented\":false");
+        assertThat(response.getBody()).contains("\"name\":\"API_KEY\",\"implemented\":false");
+        assertThat(response.getBody()).contains("single-redis");
+    }
+
+    @Test
+    void capabilitiesAreAdminOnly() {
+        ResponseEntity<String> anonymous = rest.getForEntity("/api/admin/rate-limit/capabilities",
+                String.class);
+        assertThat(anonymous.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        ResponseEntity<String> denied = rest.exchange("/api/admin/rate-limit/capabilities", HttpMethod.GET,
+                new HttpEntity<>(demoUser()), String.class);
+        assertThat(denied.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
 }

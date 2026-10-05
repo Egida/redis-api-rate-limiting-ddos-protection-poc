@@ -7,11 +7,12 @@ import { API_CONFIG } from './core/api-config';
 import { DashboardApiService, OverviewSnapshot } from './core/dashboard-api.service';
 import { DashboardPageComponent } from './features/dashboard/dashboard-page.component';
 import { RequestDemoComponent } from './features/request-demo/request-demo.component';
+import { AdminPoliciesComponent } from './features/admin/admin-policies.component';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [DashboardPageComponent, RequestDemoComponent],
+  imports: [DashboardPageComponent, RequestDemoComponent, AdminPoliciesComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './app.html',
   styleUrl: './app.scss',

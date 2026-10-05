@@ -61,6 +61,54 @@ public class PolicyAdminController {
         return store.findAll().stream().map(PolicyResponse::from).toList();
     }
 
+    /**
+     * What this build can actually enforce. The admin UI binds its algorithm dropdown and scope
+     * selectors to this response, so an option is selectable only when the backend enforces it.
+     * An enum constant elsewhere in the codebase is not enforcement.
+     */
+    @GetMapping("/capabilities")
+    public CapabilitiesResponse capabilities() {
+        return new CapabilitiesResponse(
+                List.of(
+                        new AlgorithmCapability("FIXED_WINDOW", true,
+                                "Counter per epoch-aligned window. Preserves the original POC semantics."),
+                        new AlgorithmCapability("SLIDING_WINDOW", false,
+                                "Not implemented: no rolling-log enforcement exists in this build."),
+                        new AlgorithmCapability("SLIDING_WINDOW_COUNTER", false,
+                                "Not implemented: no weighted-counter enforcement exists in this build."),
+                        new AlgorithmCapability("TOKEN_BUCKET", false,
+                                "Not implemented: no bucket/refill enforcement exists in this build."),
+                        new AlgorithmCapability("LEAKY_BUCKET", false,
+                                "Not implemented: no queue/drain enforcement exists in this build."),
+                        new AlgorithmCapability("CONCURRENCY_LIMIT", false,
+                                "Not implemented: no distributed-permit enforcement exists in this build.")),
+                List.of(
+                        new ScopeCapability("ENDPOINT", true, "Method plus route template."),
+                        new ScopeCapability("IP", true, "Canonical client IP behind trusted-proxy gating."),
+                        new ScopeCapability("USER", true,
+                                "Authenticated principal; falls back to IP when unauthenticated."),
+                        new ScopeCapability("GLOBAL", true,
+                                "One quota shared by every route and identity on every instance."),
+                        new ScopeCapability("API_KEY", false,
+                                "Not implemented: no key registry or tier lookup exists in this build.")),
+                "AND: every applicable enabled policy must allow. One atomic batch inspects all "
+                        + "counters before charging any, so a denial charges nothing anywhere.",
+                "single-redis: batch scripts span keys without hash tags; Redis Cluster is unsupported.");
+    }
+
+    public record AlgorithmCapability(String name, boolean implemented, String note) {
+    }
+
+    public record ScopeCapability(String name, boolean implemented, String note) {
+    }
+
+    public record CapabilitiesResponse(
+            List<AlgorithmCapability> algorithms,
+            List<ScopeCapability> scopes,
+            String composition,
+            String topology) {
+    }
+
     @GetMapping("/policies/{id}")
     public PolicyResponse get(@PathVariable String id) {
         return PolicyResponse.from(store.find(id).orElseThrow(() -> new PolicyNotFoundException(id)));

@@ -1,0 +1,240 @@
+<section class="admin" aria-labelledby="admin-heading">
+  <h2 id="admin-heading">Admin &#8212; Rate Limit Policies</h2>
+  <p class="warning" role="note">
+    Changes here affect live traffic immediately on every instance. There is no staging step.
+  </p>
+
+  @if (!loggedIn()) {
+    <form class="login" (ngSubmit)="onLogin()" aria-label="Administrator login">
+      <p>
+        Administrator credentials for the policy API. They stay in this page&#8217;s memory only and
+        are never stored in the browser.
+      </p>
+      <label>
+        Username
+        <input type="text" name="admin-user" [ngModel]="loginUser()" (ngModelChange)="loginUser.set($event)" autocomplete="username" required />
+      </label>
+      <label>
+        Password
+        <input type="password" name="admin-password" [ngModel]="loginPassword()" (ngModelChange)="loginPassword.set($event)" autocomplete="current-password" required />
+      </label>
+      @if (loginError()) {
+        <p class="error" role="alert">{{ loginError() }}</p>
+      }
+      <button type="submit" class="btn-primary" [disabled]="busy()">Log in</button>
+    </form>
+  } @else {
+    <p class="session">
+      Logged in as <strong>{{ loginName() }}</strong>.
+      <button type="button" class="btn-secondary" (click)="onLogout()">Log out</button>
+      <button type="button" class="btn-secondary" (click)="reloadAll()" [disabled]="busy()">Reload</button>
+    </p>
+    @if (loadError()) {
+      <p class="error" role="alert">{{ loadError() }}</p>
+    }
+
+    @if (capabilities(); as caps) {
+      <p class="composition" role="note">{{ caps.composition }} Topology: {{ caps.topology }}</p>
+    }
+
+    <h3>Policies</h3>
+    @if (policies().length === 0) {
+      <p class="empty">No policies stored. Create one below, or reset from the backend seed.</p>
+    } @else {
+      <table class="policy-table">
+        <thead>
+          <tr>
+            <th scope="col">ID</th>
+            <th scope="col">Route</th>
+            <th scope="col">Algorithm</th>
+            <th scope="col">Scope</th>
+            <th scope="col">Parameters</th>
+            <th scope="col">Enabled</th>
+            <th scope="col">Version</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (policy of policies(); track policy.id) {
+            <tr>
+              <td><code>{{ policy.id }}</code></td>
+              <td><code>{{ policy.method }} {{ policy.path ?? '(global)' }}</code></td>
+              <td>{{ policy.algorithm }}</td>
+              <td>{{ policy.scope }}</td>
+              <td>{{ policy.parameterSummary }}</td>
+              <td>
+                <span class="state" [class.on]="policy.enabled" [class.off]="!policy.enabled">
+                  {{ policy.enabled ? 'On' : 'Off' }}
+                </span>
+              </td>
+              <td>v{{ policy.version }}</td>
+              <td class="actions">
+                <button type="button" class="btn-secondary" (click)="onEdit(policy)">Edit</button>
+                <button type="button" class="btn-secondary" (click)="onToggleEnabled(policy)" [disabled]="busy()">
+                  {{ policy.enabled ? 'Disable' : 'Enable' }}
+                </button>
+                <button type="button" class="btn-secondary" (click)="onProbe(policy)" [disabled]="probeRunning()">Probe</button>
+                @if (confirmDeleteId() === policy.id) {
+                  <button type="button" class="btn-danger" (click)="onDelete(policy)" [disabled]="busy()">Confirm delete</button>
+                } @else {
+                  <button type="button" class="btn-secondary" (click)="onDelete(policy)">Delete</button>
+                }
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+    <p><button type="button" class="btn-primary" (click)="onCreate()">New policy</button></p>
+    @if (formError()) {
+      <p class="error" role="alert">{{ formError() }}</p>
+    }
+
+    @if (mode() !== 'list') {
+      <form class="editor" (ngSubmit)="onSave()" aria-label="Policy editor">
+        <h3>{{ mode() === 'create' ? 'New policy' : 'Edit ' + fId() + ' (version ' + fVersion() + ')' }}</h3>
+        @if (mode() === 'create') {
+          <label>
+            Id
+            <input type="text" name="f-id" [ngModel]="fId()" (ngModelChange)="fId.set($event)" required />
+          </label>
+        }
+        <label>
+          Name
+          <input type="text" name="f-name" [ngModel]="fName()" (ngModelChange)="fName.set($event)" />
+        </label>
+        <label>
+          Method
+          <select name="f-method" [ngModel]="fMethod()" (ngModelChange)="fMethod.set($event)">
+            <option>GET</option>
+            <option>POST</option>
+            <option>PUT</option>
+            <option>PATCH</option>
+            <option>DELETE</option>
+            <option>ANY</option>
+          </select>
+        </label>
+        @if (fScope() !== 'GLOBAL') {
+          <label>
+            Path
+            <input type="text" name="f-path" [ngModel]="fPath()" (ngModelChange)="fPath.set($event)" placeholder="/api/products" required />
+          </label>
+        }
+        <label>
+          Algorithm
+          <select name="f-algorithm" [ngModel]="fAlgorithm()" (ngModelChange)="fAlgorithm.set($event)">
+            @for (algo of implementedAlgorithms(); track algo.name) {
+              <option [value]="algo.name">{{ algo.name }} &#8212; enforced</option>
+            }
+            @for (algo of unimplementedAlgorithms(); track algo.name) {
+              <option [value]="algo.name" disabled>{{ algo.name }} &#8212; not implemented</option>
+            }
+          </select>
+        </label>
+        <label>
+          Scope
+          <select name="f-scope" [ngModel]="fScope()" (ngModelChange)="fScope.set($event)">
+            @for (scope of implementedScopes(); track scope.name) {
+              <option [value]="scope.name">{{ scope.name }} &#8212; {{ scope.note }}</option>
+            }
+          </select>
+        </label>
+        <p class="hint">
+          A request must pass <strong>every</strong> policy that matches it: route, user, IP and
+          global rules combine with AND, and a denial charges nothing.
+        </p>
+        <label>
+          Window (seconds)
+          <input type="number" name="f-window" [ngModel]="fWindowSeconds()" (ngModelChange)="fWindowSeconds.set($event)" min="1" required />
+        </label>
+        <label>
+          Limit per window
+          <input type="number" name="f-limit" [ngModel]="fLimit()" (ngModelChange)="fLimit.set($event)" min="1" required />
+        </label>
+        <label class="check">
+          <input type="checkbox" name="f-enabled" [ngModel]="fEnabled()" (ngModelChange)="fEnabled.set($event)" />
+          Enabled
+        </label>
+        <label>
+          On Redis error
+          <select name="f-failure" [ngModel]="fFailureMode()" (ngModelChange)="fFailureMode.set($event)">
+            <option value="">Inherit global default</option>
+            <option value="FAIL_OPEN">Fail open</option>
+            <option value="FAIL_CLOSED">Fail closed (503)</option>
+          </select>
+        </label>
+        @if (formInfo()) {
+          <p class="info" role="status">{{ formInfo() }}</p>
+        }
+        <p>
+          <button type="submit" class="btn-primary" [disabled]="busy()">Save</button>
+          <button type="button" class="btn-secondary" (click)="onCancelEdit()">Cancel</button>
+        </p>
+      </form>
+    }
+
+    @if (probePolicyId(); as probeId) {
+      <section class="probe" aria-label="Policy probe">
+        <h3>Probe: {{ probeId }}</h3>
+        @if (!probeRunning() && !probeSummary()) {
+          <label>
+            Requests (max 30)
+            <input type="number" name="probe-count" [ngModel]="probeCount()" (ngModelChange)="probeCount.set($event)" min="1" max="30" />
+          </label>
+          <button type="button" class="btn-primary" (click)="onProbe(policies().find((p) => p.id === probeId)!)">Start probe</button>
+        }
+        @if (probeRunning()) {
+          <p role="status">Sending probe traffic&#8230;</p>
+          <button type="button" class="btn-secondary" (click)="onProbeCancel()">Cancel</button>
+        }
+        @if (probeSummary(); as summary) {
+          <p>
+            Sent {{ summary.totalSent }}: {{ summary.success }} allowed, {{ summary.rejected }} rejected.
+            @if (summary.first429Index !== null) {
+              First 429 at request #{{ summary.first429Index }}.
+            } @else {
+              No 429 in this run.
+            }
+            @if (summary.lastRejection) {
+              Retry-After: {{ summary.lastRejection.headers.retryAfter }}s, policy {{ summary.lastRejection.headers.policy }}.
+            }
+          </p>
+          @if (probeWindowNote()) {
+            <p class="hint">{{ probeWindowNote() }}</p>
+          }
+          <button type="button" class="btn-secondary" (click)="probeSummary.set(null); probePolicyId.set(null)">Close</button>
+        }
+      </section>
+    }
+
+    <h3>Audit history</h3>
+    @if (audit().length === 0) {
+      <p class="empty">No audit entries yet.</p>
+    } @else {
+      <table class="policy-table">
+        <thead>
+          <tr>
+            <th scope="col">When</th>
+            <th scope="col">Actor</th>
+            <th scope="col">Policy</th>
+            <th scope="col">Operation</th>
+            <th scope="col">Version</th>
+            <th scope="col">Changed fields</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (entry of audit(); track entry.at + entry.policyId + entry.operation) {
+            <tr>
+              <td>{{ entry.at }}</td>
+              <td>{{ entry.actor }}</td>
+              <td><code>{{ entry.policyId }}</code></td>
+              <td>{{ entry.operation }}</td>
+              <td>v{{ entry.resultingVersion }}</td>
+              <td>{{ entry.changedFields.join(', ') || '—' }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  }
+</section>

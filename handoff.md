@@ -65,7 +65,7 @@ bookkeeping.** Two separate JVMs, one Redis, one counter.
 │   │       └── SecurityConfig.java                 in-memory users, HTTP Basic, /api/orders guarded
 │   ├── src/main/resources/application.yml          all rate-limit configuration
 │   ├── src/test/java/…                             10 test classes, 86 tests
-│   ├── scripts/  verify-all.ps1 · load-demo.ps1 · two-instance-demo.ps1 · lib/timing.ps1
+│   ├── scripts/  verify-all.ps1 · load-demo.ps1 · two-instance-demo.ps1 · admin-cross-instance-demo.ps1 · lib/timing.ps1
 │   ├── docs/api-rate-limiting-poc.md               553-line design document
 │   └── README.md                                   backend-specific commands
 │
@@ -77,13 +77,16 @@ bookkeeping.** Two separate JVMs, one Redis, one counter.
 │   │   ├── core/
 │   │   │   ├── api-config.ts          API_CONFIG injection token, poll interval 10s
 │   │   │   ├── api-client.service.ts  thin HTTP wrapper
+│   │   │   ├── admin-api.service.ts   admin CRUD + capabilities, Basic auth, memory-only credentials
+│   │   │   ├── admin-models.ts        admin DTOs, ISO duration helpers
 │   │   │   ├── dashboard-api.service.ts  health, metrics, policies, 404-means-no-data handling
 │   │   │   ├── demo-catalog.ts        the three routes as UI entries with per-route notes
 │   │   │   ├── demo-request.service.ts  single request + Basic auth, credentials dropped after
 │   │   │   └── models.ts              every response shape, documented as verified
 │   │   ├── features/
 │   │   │   ├── dashboard/dashboard-page.component.*   overview, policies, health
-│   │   │   └── request-demo/request-demo.component.* + demo-runner.service.ts
+│   │   │   ├── request-demo/request-demo.component.* + demo-runner.service.ts
+│   │   │   └── admin/admin-policies.component.*   login, list/editor/audit/probe (capabilities-bound)
 │   │   ├── app.ts / app.html / app.scss / app.spec.ts
 │   ├── src/ main.ts · styles.scss · index.html
 │   └── .vscode/ extensions.json · launch.json · tasks.json   (Angular scaffold, committed)
@@ -285,11 +288,25 @@ access method=GET path=/api/products status=200 outcome=ALLOWED durationMs=5 cli
 
 ---
 
-## 6. Tests — 88 JVM tests across 10 classes
+## 5.6. Administration API, capabilities, and console
+
+`GET /api/admin/rate-limit/capabilities` (ROLE_ADMIN) reports exactly what the build enforces:
+algorithms with `implemented` flags (only `FIXED_WINDOW` true), scopes (`API_KEY` false), the AND
+composition rule, and the `single-redis` topology note. The Angular **Admin → Rate Limit Policies**
+section (`features/admin/`, `core/admin-api.service.ts`) binds its algorithm/scope dropdowns to this
+response, so unimplemented options render disabled and can never be saved as working. The section
+covers login (Basic, memory-only credentials, never stored), list, create/edit with server-version
+conflict messaging, enable/disable, two-click delete, audit history, and a bounded probe (max 30
+sequential requests, cancellable) that reuses the demo runner. `GET /api/poc/policies` stays read-only
+for the dashboard.
+
+---
+
+## 6. Tests — 90 JVM tests across 10 classes
 
 | File | @Test | What it establishes |
 |---|---|---|
-| `PolicyAdminControllerTest` | 10 | Admin boundary: anonymous 401, demo USER 403, admin CRUD lifecycle, stale version 409, invalid policy 400, unimplemented algorithm refused, audit without secrets |
+| `PolicyAdminControllerTest` | 12 | Admin boundary: anonymous 401, demo USER 403, admin CRUD lifecycle, stale version 409, invalid policy 400, unimplemented algorithm refused, audit without secrets, capabilities content + auth |
 | `ManagedPolicyStoreTest` | 12 | Redis round trip, policy/counter namespacing, create refusal, stale-version conflict, version advance, concurrent-save winner, delete, audit, seed/reset, validation |
 | `RateLimitIdentityResolverTest` | 25 | IPv4 spelling canonicalisation, XFF right-to-left walk, forged leftmost prefix, multi-hop, all-trusted, untrusted peer, IPv6 |
 | `RateLimitHttpIntegrationTest` | 7 | Below-limit passes, beyond-limit 429 with retry info, per-user isolation, authenticated route limits by user not IP, 401 is not rate-limited, excluded routes pass, bounded metric labels |
@@ -314,10 +331,13 @@ overshoot; a naive read-then-increment would leak past 400.
 **separate connection factories** against one Redis, 8 requests alternating between them for a limit
 of 4, asserts exactly 4 allowed. A real shared-state test, not a mock.
 
-### Frontend — 25 tests across 5 suites
+### Frontend — 33 tests across 6 files
 
 `app.spec.ts`, `dashboard-api.service.spec.ts`, `demo-catalog.spec.ts`,
-`demo-runner.service.spec.ts`. Runner is `@angular/build:unit-test` on Vitest 5 (jsdom). Note
+`demo-runner.service.spec.ts`, `admin-api.service.spec.ts` (login/auth mapping, 409/400 mapping,
+logout drops credentials), `admin-policies.component.spec.ts` (login gating, capabilities-bound
+dropdown, unimplemented algorithm refused locally). Runner is `@angular/build:unit-test` on Vitest 5
+(jsdom). `npm run build`: Initial 267.66 kB, transfer 71.22 kB. Note
 `app.spec.ts` asserts credentials, Redis keys and authorization headers are never rendered.
 
 ---
@@ -328,7 +348,7 @@ Measured in this environment, not quoted from anywhere.
 
 | Command | Result |
 |---|---|
-| `mvn -B -o clean test` | Tests run 88, Failures 0, Errors 0 — BUILD SUCCESS |
+| `mvn -B -o clean test` | Tests run 90, Failures 0, Errors 0 — BUILD SUCCESS |
 | `npm test` | 5 suites, 25/25 passed, 4.46 s |
 | `npm run build` | Initial 244.44 kB, Transfer 66.15 kB, bundle 4.847 s |
 | `verify-all.ps1 -SkipBuild -SkipUnitTests` | 133.50 s, every step OK |
@@ -336,13 +356,16 @@ Measured in this environment, not quoted from anywhere.
 | `load-demo.ps1` orders, 45 req, limit 30 | 30×200, 15×429, first 429 at **#31** — PASS |
 | `load-demo.ps1 -SelfTest` | 8 window-arithmetic checks passed, exit 0 |
 | `two-instance-demo.ps1` | 89.3 s — 2 JVMs on 18081/18082 (pids 18120/7364), 30×200 + 30×429 each, **one** Redis key, count 60, pttl 17760 |
+| `admin-cross-instance-demo.ps1` | 14/14 checks passed, 2 real JVMs (:18081/:18082), one Redis. Edit on A (products-read 100→5, v5→v6); B allowed exactly 5 then 5×429, first 429 at #6, counter == 5. alice 403, stale edit 409, namespaces disjoint, limit restored to 100 (v7). |
 | browser demo, 150 requests | 100 allowed / 50 rejected, first 429 at **#101**, 1.9 s, `Retry-After: 59 s` |
 
 Toolchain: Java 21.0.12.1, Maven 3.9.16, Node 24.19.0, npm 11.17.0, Docker 29.8.0.
 
-**The counter records every attempt**, allowed and rejected alike. 60 requests with a limit of 30
-leaves `count = 60` in Redis while only 30 were allowed — that is correct and is what the two-instance
-evidence shows.
+**Since the atomic batch (commit `e0de509`), a denied request charges nothing.** The counter holds
+exactly the allowed requests — 60 requests against a limit of 30 leaves `count = 30`, not 60.
+Rejected attempts are tracked separately in `ratelimit.requests{outcome=rejected}` and the access log.
+Older evidence showing `count = 60` predates the atomic batch and its totals are no longer reproducible
+by design, not by regression.
 
 ### The demo scripts
 
@@ -351,6 +374,7 @@ evidence shows.
 | `verify-all.ps1` | Full gate. Build (offline first, downgrade to online), JVM tests, Angular tests, Angular build, Redis, app boot on **:8085**, API contract checks, both load demos. Per-step timing with warn/fatal budgets, fail-fast. Flags: `-SkipBuild`, `-SkipUnitTests`, `-KeepRunning`, `-Port`. |
 | `load-demo.ps1` | One route, one policy. Waits for a fresh window, sends N requests, cross-checks the Redis counter when `-RedisContainer` is given, prints first-429 position, then asserts `allowed == min(sent, limit)` and `first429 == limit + 1`. `-Strict` exits non-zero on any mismatch. `-SelfTest` exercises the window arithmetic with no traffic. |
 | `two-instance-demo.ps1` | Two real `java -jar` processes against one Redis. |
+| `admin-cross-instance-demo.ps1` | Two real JVMs on scanned ports: admin edit on A, enforcement observed on B, namespaces/auth/409 checks, policy restored. Credentials passed as mandatory params, never stored. |
 | `lib/timing.ps1` | `Write-Phase`, `New-Step`, `Complete-Step`, `Assert-StepBudget`, `Wait-ForHttp`, `Wait-ForRedisPing`, `Invoke-Native`. |
 
 `verify-all.ps1` asserts `/index.html` must be 404 — the jar must never serve a static console.
@@ -408,7 +432,7 @@ Verified against the live DOM: title `RateGuard - API Protection Console`, Redis
 | `43272c5` | Initial commit — 83 files |
 | `b890e73` | Markdown report + README doc-map link |
 | see `git log` | Angular 22 version correction across README, Markdown report, HTML report, regenerated PDF |
-| **uncommitted** | Atomic multi-policy batch (`consumeAll`): one Lua script inspects all counters before charging any; denial charges nothing |
+| **uncommitted** | Two-JVM admin proof (`admin-cross-instance-demo.ps1`, 14/14), capabilities endpoint, Angular admin section, counter-semantics correction (denials charge nothing) |
 
 ### The Angular version error, and the fix
 
@@ -580,7 +604,7 @@ The brief this POC answers has 11 scope items and 16 acceptance criteria. All ar
 | 12 | Documented key convention | `RedisRateLimitStore:95`, design doc §4 |
 | 13 | Allowed/rejected statistics | `ratelimit.requests` counter, tagged by outcome |
 | 14 | Redis failure handled | per-policy fail-open/closed, 503 on fail-closed |
-| 15 | Six required test classes | 88 tests across 10 classes — see §6 |
+| 15 | Six required test classes | 90 tests across 10 classes — see §6 |
 | 16 | Eight documentation topics | design doc 15 sections + README + 3 report formats |
 
 **Sample limits match the brief exactly:** `GET /api/products` 100/min/IP,
