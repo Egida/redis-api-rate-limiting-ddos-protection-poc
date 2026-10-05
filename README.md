@@ -5,7 +5,7 @@ Angular console that shows the limit being hit in a browser.
 
 - **Backend** — Spring Boot 3.5.16 on Java 21, fixed-window counter in Redis, three policies with
   independent failure modes, Actuator counters exposed for evidence.
-- **Frontend** — Angular 20 standalone components, no UI framework, talks to the backend through a
+- **Frontend** — Angular 22 standalone components, no UI framework, talks to the backend through a
   dev proxy.
 - **Proof** — the same counter is enforced by **two separate JVMs**, so the limit is genuinely
   shared state and not per-process bookkeeping.
@@ -236,7 +236,7 @@ first rejections at **#101** and **#31**, matching the configured 100 and 30 lim
 │   ├── scripts/                 verify-all · load-demo · two-instance-demo
 │   ├── docs/                    deep design doc
 │   └── README.md
-├── frontend/                    Angular 20 console
+├── frontend/                    Angular 22 console
 │   ├── src/app/core/            API client, config, demo runner, models
 │   ├── src/app/features/        dashboard · request-demo
 │   └── proxy.conf.json

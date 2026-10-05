@@ -2,7 +2,7 @@
 
 **Proof of Concept — architecture, evidence and verification results**
 
-Spring Boot 3.5.16 · Java 21 · Redis 7 · Angular 20
+Spring Boot 3.5.16 · Java 21 · Redis 7 · Angular 22
 30 September 2026
 
 A working proof of concept for API rate limiting with Redis as the shared counter store, plus an
@@ -308,7 +308,7 @@ Stated plainly, because a POC that hides these is not a POC.
 │   ├── scripts/                 verify-all · load-demo · two-instance-demo
 │   ├── docs/                    deep design doc
 │   └── README.md
-├── frontend/                    Angular 20 console
+├── frontend/                    Angular 22 console
 │   ├── src/app/core/            API client, config, demo runner, models
 │   ├── src/app/features/        dashboard · request-demo
 │   └── proxy.conf.json
