@@ -34,6 +34,7 @@ bookkeeping.** Two separate JVMs, one Redis, one counter.
 | Branch | `main`, tracking `origin/main` |
 | Commits | `43272c5` (initial) · `b890e73` (Markdown report) · one more, see §9 |
 | Git identity | already set globally — do not set it again |
+| **Latest changes** | Access logging filter + Tomcat DEBUG logging (uncommitted, see §16) |
 
 ---
 
@@ -48,7 +49,7 @@ bookkeeping.** Two separate JVMs, one Redis, one counter.
 │   │   ├── RateLimitPocApplication.java            @SpringBootApplication @ConfigurationPropertiesScan
 │   │   ├── config/
 │   │   │   ├── RateLimitProperties.java            typed config + Policy record + enums
-│   │   │   └── RateLimitConfiguration.java         bean wiring + filter ordering
+│   │   │   └── RateLimitConfiguration.java         bean wiring + filter ordering + access log filter
 │   │   ├── ratelimit/
 │   │   │   ├── RateLimitFilter.java                the HTTP filter: decide, then allow or 429
 │   │   │   ├── RedisRateLimitStore.java            the Lua script, key layout, SHA-256 hashing
@@ -58,6 +59,7 @@ bookkeeping.** Two separate JVMs, one Redis, one counter.
 │   │   │   ├── RateLimitDecision.java              record: allowed, limit, remaining, retryAfter
 │   │   │   └── RateLimitMetrics.java               Micrometer counters, bounded labels
 │   │   └── web/
+│   │       ├── AccessLogFilter.java                logs every request: IP, method, path, outcome, latency, status
 │   │       ├── DemoController.java                 the three stand-in business routes
 │   │       ├── PocMetadataController.java          GET /api/poc/policies for the console
 │   │       └── SecurityConfig.java                 in-memory users, HTTP Basic, /api/orders guarded
@@ -161,10 +163,15 @@ bleeding into one another.
   `::ffff:127.0.0.1` all collapse onto one identity instead of minting separate Redis keys.
 - Identities are SHA-256 hashed (first 8 bytes, hex) so raw addresses stay out of Redis.
 
-### Filter ordering — `RateLimitConfiguration.java:41-48`
+### Filter ordering — `RateLimitConfiguration.java:41-58`
 
-`Ordered.LOWEST_PRECEDENCE - 100`, registered **after** the Spring Security chain (which is also
-`-100`, and loses the tie) so `SecurityContext` is populated before a USER identity resolves.
+| Filter | Order | Purpose |
+|---|---|---|
+| Spring Security chain | `-100` (default) | Authentication, populates `SecurityContext` |
+| **AccessLogFilter** | `LOWEST_PRECEDENCE - 150` | Wraps entire chain, sees final status (200/429/401/503) |
+| **RateLimitFilter** | `LOWEST_PRECEDENCE - 100` | Enforces limit, short-circuits on 429/503 |
+
+AccessLogFilter runs **before** RateLimitFilter so it wraps the whole chain and logs rejections even when RateLimitFilter short-circuits. The order values are negative, so more negative = runs earlier.
 
 ---
 
@@ -184,6 +191,12 @@ rate-limit:
     - { id: login-attempt,  method: POST, path: /api/login,    limit: 10,  window: 60s, identity: IP,
         on-redis-error: fail_closed }
     - { id: order-create,   method: POST, path: /api/orders,   limit: 30,  window: 60s, identity: USER }
+
+logging:
+  level:
+    com.example.ratelimit: INFO
+    org.apache.catalina.connector.CoyoteAdapter: DEBUG   # request line + headers
+    org.apache.coyote.http11.Http11InputBuffer: DEBUG    # response headers
 ```
 
 | id | method | path | limit | window | identity | Redis failure |
@@ -250,6 +263,33 @@ Redis key, identity or credential, and there is no mutation endpoint.
 
 `/index.html` on the jar returns **404** — the Angular bundle is never packaged into the backend,
 and a test asserts it.
+
+---
+
+## 5.5. Access Logging — `AccessLogFilter.java`
+
+Every HTTP request is logged to `redis-rate-limit-poc/logs/backend.log` with:
+
+```
+ACCESS ip=0:0:0:0:0:0:0:1 POST /api/login -> REJECTED (rate limit) (6ms) [429]
+ACCESS ip=0:0:0:0:0:0:0:1 GET /api/products -> APPROVED (5ms) [200]
+```
+
+**Fields:** client IP (from `X-Forwarded-For` / `X-Real-IP` / remote addr), HTTP method, full path + query, outcome, latency, HTTP status.
+
+**Outcomes:**
+- `APPROVED` — 2xx
+- `REJECTED (rate limit)` — 429
+- `REJECTED (unauthorized)` — 401
+- `REJECTED (forbidden)` — 403
+- `REJECTED (service unavailable)` — 503
+- `STATUS_<code>` — anything else
+
+**Filter ordering:** AccessLogFilter runs at `LOWEST_PRECEDENCE - 150` (before RateLimitFilter at `-100`) so it wraps the entire chain and sees the final status even when RateLimitFilter short-circuits on 429/503.
+
+**Tomcat DEBUG logging** is also enabled via `application.yml`:
+- `org.apache.catalina.connector.CoyoteAdapter: DEBUG` — request line + headers
+- `org.apache.coyote.http11.Http11InputBuffer: DEBUG` — response headers
 
 ---
 
@@ -374,6 +414,7 @@ Verified against the live DOM: title `RateGuard - API Protection Console`, Redis
 | `43272c5` | Initial commit — 83 files |
 | `b890e73` | Markdown report + README doc-map link |
 | see `git log` | Angular 22 version correction across README, Markdown report, HTML report, regenerated PDF |
+| **uncommitted** | AccessLogFilter + Tomcat DEBUG logging (this session) |
 
 ### The Angular version error, and the fix
 
@@ -389,6 +430,10 @@ To regenerate the PDF after editing the HTML:
 node "$env:TEMP\opencode\make-pdf.cjs"        # HTML → PDF, logs every image's dimensions
 node "$env:TEMP\opencode\check-layout.cjs"    # fails if any block exceeds the 263mm page height
 ```
+
+### Access logging (this session)
+
+Added `AccessLogFilter.java` and registered it in `RateLimitConfiguration.java` before the rate limit filter. Enabled Tomcat DEBUG logging for request/response headers via `application.yml`. Log file: `redis-rate-limit-poc/logs/backend.log`. See §5.5.
 
 ---
 
@@ -408,8 +453,9 @@ State these before a reviewer finds them.
    only.
 5. **Actuator counters are in-memory** and reset with the process. The console labels its totals
    "browser-observed since this page opened" for exactly this reason.
-6. **No durable rejection log.** Rejections are counted, not recorded anywhere permanent. A real
-   system wants an audit trail and alerting on the rejected counter.
+6. **Rejections are logged to console/file, not a durable audit store.** `AccessLogFilter` writes
+   every rejection to `backend.log` with IP, path, latency, and status. A production system would
+   ship these to a log aggregator (Loki/ELK/Datadog) with retention and alerting.
 7. **Route matching is literal Ant patterns.** No regex, no versioning.
 8. **No WebSocket or gRPC transport** coverage.
 9. **`Retry-After` may exceed the window end** by the `ttl-grace` (1s).
@@ -480,6 +526,24 @@ It handles the spaces-in-this-path problem correctly with `pushd` / `start /D`, 
 
 Neither README references it. **Choose: commit it, document it in both READMEs, or delete it. Do
 not re-author it.**
+
+### ngrok for external access (this session)
+
+Installed `ngrok` via `winget install Ngrok.Ngrok`. To expose the demo externally:
+
+```powershell
+# Terminal A - frontend
+ngrok http 4200
+
+# Terminal B - backend API
+ngrok http 8080
+```
+
+Both tunnels share the ngrok dashboard at `http://localhost:4040` showing every request with client IP, headers, body, latency.
+
+**Important:** The Angular dev server blocks unknown hosts by default. Added `allowedHosts: ["automaker-rebuff-astrology.ngrok-free.dev"]` to `frontend/angular.json` serve options. For a new ngrok URL, either:
+- Add the new host to `allowedHosts` and restart `npm start`, or
+- Use the backend ngrok URL directly for API calls (`curl https://<backend-ngrok>/api/...`)
 
 ### Known public-repo facts
 

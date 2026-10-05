@@ -28,6 +28,8 @@ management:
 logging:
   level:
     com.example.ratelimit: INFO
+    org.apache.catalina.connector.CoyoteAdapter: DEBUG
+    org.apache.coyote.http11.Http11InputBuffer: DEBUG
 
 rate-limit:
   enabled: true

@@ -57,21 +57,24 @@
                                                                                          },
                                                                       "defaultConfiguration":  "production"
                                                                   },
-                                                        "serve":  {
+"serve":  {
                                                                       "builder":  "@angular/build:dev-server",
                                                                       "configurations":  {
-                                                                                             "production":  {
-                                                                                                                "buildTarget":  "frontend:build:production"
-                                                                                                            },
-                                                                                             "development":  {
-                                                                                                                 "buildTarget":  "frontend:build:development"
-                                                                                                             }
-                                                                                         },
+                                                                                     "production":  {
+                                                                                                    "buildTarget":  "frontend:build:production"
+                                                                                                },
+                                                                                     "development":  {
+                                                                                                    "buildTarget":  "frontend:build:development"
+                                                                                                }
+                                                                                 },
                                                                       "defaultConfiguration":  "development",
                                                                       "options":  {
-                                                                                      "proxyConfig":  "proxy.conf.json"
+                                                                                      "proxyConfig":  "proxy.conf.json",
+                                                                                      "allowedHosts":  [
+                                                                                                          "automaker-rebuff-astrology.ngrok-free.dev"
+                                                                                                      ]
                                                                                   }
-                                                                  },
+                                                                   },
                                                         "test":  {
                                                                      "builder":  "@angular/build:unit-test"
                                                                  }
