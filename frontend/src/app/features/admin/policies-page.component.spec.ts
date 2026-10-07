@@ -76,6 +76,20 @@ const POLICIES = [
   },
 ];
 
+const EXEMPTIONS = [
+  {
+    id: 'ex-health',
+    name: 'ex-health',
+    method: 'GET',
+    path: '/api/exempt-only',
+    enabled: true,
+    version: 1,
+    createdAt: '2026-10-05T10:00:00Z',
+    updatedAt: '2026-10-05T10:00:00Z',
+    updatedBy: 'pocadmin',
+  },
+];
+
 describe('PoliciesPageComponent', () => {
   let fixture: ComponentFixture<PoliciesPageComponent>;
   let http: HttpTestingController;
@@ -94,15 +108,18 @@ describe('PoliciesPageComponent', () => {
     fixture.detectChanges();
   });
 
-  /** The page loads capabilities and policies on entry. */
-  async function loadWorkspace(policies: unknown[] = POLICIES): Promise<void> {
+  /** The page loads capabilities, policies and exemptions on entry. */
+  async function loadWorkspace(policies: unknown[] = POLICIES, exemptions: unknown[] = []): Promise<void> {
     http.expectOne(`${BASE}/capabilities`).flush(CAPABILITIES);
     http.expectOne(`${BASE}/policies`).flush(policies);
+    http.expectOne(`${BASE}/exemptions`).flush(exemptions);
     await settle();
   }
 
   const settle = async () => {
     await fixture.whenStable();
+    // A macrotask drains service promise chains that whenStable may resolve ahead of.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
   };
 
@@ -133,16 +150,64 @@ describe('PoliciesPageComponent', () => {
     expect(text()).toContain('No policies are stored');
   });
 
-  it('offers a retry when the workspace fails to load', async () => {
+  it('reports and retries each failed section on its own', async () => {
     http.expectOne(`${BASE}/capabilities`).flush('', { status: 500, statusText: 'Server Error' });
     http.expectOne(`${BASE}/policies`).flush('', { status: 500, statusText: 'Server Error' });
+    http.expectOne(`${BASE}/exemptions`).flush('', { status: 500, statusText: 'Server Error' });
     await settle();
 
     expect(text()).toContain('HTTP 500');
-    await click('.alert-bad + button');
-    // The retry re-requests both, proving the failure state is recoverable.
+    const retries = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('button'),
+    ).filter((b) => b.textContent?.trim().startsWith('Retry'));
+    expect(retries.map((b) => b.textContent?.trim())).toEqual([
+      'Retry capabilities',
+      'Retry policies',
+      'Retry exemptions',
+    ]);
+
+    // Retrying capabilities must not re-request the other two sections.
+    retries[0].click();
+    fixture.detectChanges();
+    await settle();
     http.expectOne(`${BASE}/capabilities`);
-    http.expectOne(`${BASE}/policies`);
+    http.expectNone((req) => req.url === `${BASE}/policies`);
+    http.expectNone((req) => req.url === `${BASE}/exemptions`);
+  });
+
+  it('keeps policies and capabilities visible when only exemptions fail', async () => {
+    http.expectOne(`${BASE}/capabilities`).flush(CAPABILITIES);
+    http.expectOne(`${BASE}/policies`).flush(POLICIES);
+    http.expectOne(`${BASE}/exemptions`).flush('', { status: 500, statusText: 'Server Error' });
+    await settle();
+
+    // The exemption failure is reported on its own and hides nothing else.
+    expect(text()).toContain('Exemptions could not be loaded');
+    expect(text()).toContain('products-read');
+    expect(text()).toContain('Composition:');
+  });
+
+  it('does not present empty algorithm and scope selects when capabilities fail', async () => {
+    http.expectOne(`${BASE}/capabilities`).flush('', { status: 500, statusText: 'Server Error' });
+    http.expectOne(`${BASE}/policies`).flush(POLICIES);
+    http.expectOne(`${BASE}/exemptions`).flush([]);
+    await settle();
+    await click('.page-head button');
+
+    expect(query('select[name="f-algorithm"]')).toBeNull();
+    expect(query('select[name="f-scope"]')).toBeNull();
+    expect(text()).toContain('Retry capabilities');
+
+    // Saving is refused rather than sending invented algorithm/scope values.
+    const id = query<HTMLInputElement>('input[name="f-id"]')!;
+    id.value = 'new-policy';
+    id.dispatchEvent(new Event('input'));
+    const path = query<HTMLInputElement>('input[name="f-path"]')!;
+    path.value = '/api/new';
+    path.dispatchEvent(new Event('input'));
+    await click('button[type="submit"]');
+    expect(text()).toContain('could not be loaded');
+    http.expectNone((req) => req.url === `${BASE}/policies` && req.method === 'POST');
   });
 
   it('filters the list without another request', async () => {
@@ -202,5 +267,51 @@ describe('PoliciesPageComponent', () => {
     await settle();
     // The list is re-read from the server, which is what proves the delete landed.
     http.expectOne(`${BASE}/policies`).flush(POLICIES);
+  });
+
+  it('lists exemptions and deletes one after a single press', async () => {
+    await loadWorkspace(POLICIES, EXEMPTIONS);
+    const region = query('[aria-label="Rate-limit exemptions"]')!;
+    expect(region.textContent).toContain('/api/exempt-only');
+
+    region.querySelector<HTMLButtonElement>('.btn-danger-ghost')!.click();
+    fixture.detectChanges();
+    http
+      .expectOne((req) => req.url === `${BASE}/exemptions/ex-health` && req.method === 'DELETE')
+      .flush({});
+    await settle();
+    http.expectOne(`${BASE}/exemptions`).flush([]);
+    await settle();
+    expect(text()).not.toContain('Rate-limit exemptions');
+  });
+
+  it('exemption checkbox hides rate-limit fields and posts to the exemptions endpoint', async () => {
+    await loadWorkspace();
+    await click('.page-head button');
+
+    const id = query<HTMLInputElement>('input[name="f-id"]')!;
+    id.value = 'ex-health';
+    id.dispatchEvent(new Event('input'));
+    const path = query<HTMLInputElement>('input[name="f-path"]')!;
+    path.value = '/api/exempt-only';
+    path.dispatchEvent(new Event('input'));
+
+    const exempt = query<HTMLInputElement>('input[name="f-exempt"]')!;
+    exempt.click();
+    await settle();
+    // Rate-limit specifics are irrelevant to an exemption, so they disappear.
+    expect(query('select[name="f-algorithm"]')).toBeNull();
+
+    await click('button[type="submit"]');
+    http
+      .expectOne((req) => req.url === `${BASE}/exemptions` && req.method === 'POST')
+      .flush(EXEMPTIONS[0]);
+    await settle();
+    http.expectOne(`${BASE}/exemptions`).flush(EXEMPTIONS);
+    // Saving an exemption refreshes the policy-derived request targets too.
+    http.expectOne(`${BASE}/demo-routes`).flush({ targets: [], policies: [] });
+    await settle();
+    expect(query('[role="dialog"]')).toBeNull();
+    expect(text()).toContain('/api/exempt-only');
   });
 });

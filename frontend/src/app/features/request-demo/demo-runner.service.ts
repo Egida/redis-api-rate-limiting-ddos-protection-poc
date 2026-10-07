@@ -30,6 +30,7 @@ export class DemoRunnerService {
       totalSent: 0,
       success: 0,
       rejected: 0,
+      notFound: 0,
       error: 0,
       statuses: {},
       first429Index: null,
@@ -75,6 +76,11 @@ export class DemoRunnerService {
               message: result.message,
             };
           }
+        } else if (result.status === 404) {
+          // A configured policy may name a path no handler serves. The filter already ran before
+          // routing, so this response says nothing about the limit; keep going so a later 429 can
+          // still show whether the policy is enforced.
+          summary.notFound += 1;
         } else {
           // 401, 403, 503 or offline: the route is not behaving as this POC expects, so stop
           // rather than spending the remaining budget on a broken run.

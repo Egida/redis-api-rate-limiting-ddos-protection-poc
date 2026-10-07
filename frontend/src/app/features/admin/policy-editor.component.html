@@ -72,7 +72,19 @@
         </div>
       </fieldset>
 
-      <fieldset>
+      @if (isCreate()) {
+        <label class="field field-inline exempt-check">
+          <input type="checkbox" name="f-exempt" [ngModel]="fExempt()" (ngModelChange)="fExempt.set($event)" />
+          <span>
+            <strong>Exclude this API from rate limiting</strong>
+            <span class="help">Matching requests bypass all rate-limit policies, including GLOBAL and APPLICATION policies. This applies to every caller that can reach this route.</span>
+          </span>
+        </label>
+      }
+
+      @if (!fExempt()) {
+        @if (store.capabilitiesReady()) {
+        <fieldset>
         <legend>Algorithm and scope</legend>
         <div class="field-grid">
           <label class="field">
@@ -111,7 +123,19 @@
           </p>
         }
       </fieldset>
+        } @else {
+        <p class="alert alert-bad" role="alert">
+          {{ store.capabilitiesState().error ? store.capabilitiesState().error : 'Loading algorithm and scope options…' }}
+        </p>
+        @if (store.capabilitiesState().error) {
+          <button type="button" class="btn-secondary" (click)="store.loadCapabilities()">
+            Retry capabilities
+          </button>
+        }
+        }
+      }
 
+      @if (!fExempt() && store.capabilitiesReady()) {
       <fieldset>
         <legend>Parameters</legend>
         <div class="field-grid">
@@ -187,6 +211,14 @@
           </label>
         </div>
       </fieldset>
+      }
+
+      @if (fExempt()) {
+        <div class="alert alert-warn" role="alert">
+          <p class="alert-title">Rate-limit exemption</p>
+          <p>Matching requests will bypass <strong>all</strong> rate-limit policies, including GLOBAL and APPLICATION. This applies to every caller that can reach this route.</p>
+        </div>
+      }
 
       @if (fieldErrors().length > 0) {
         <div class="alert alert-bad" role="alert">

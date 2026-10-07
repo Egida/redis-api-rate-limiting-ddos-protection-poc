@@ -8,6 +8,9 @@ import {
   AdminPolicy,
   AuditRecord,
   Capabilities,
+  DemoRouteCatalogResponse,
+  ExemptionEdit,
+  ExemptionRecord,
   PolicyEdit,
 } from './admin-models';
 
@@ -101,6 +104,25 @@ export class AdminApiService {
 
   audit(limit = 50): Observable<AuditRecord[] | AdminApiError> {
     return this.authed<AuditRecord[]>('GET', `/audit?limit=${limit}`);
+  }
+
+  deleteExemption(id: string): Observable<{ deleted: true } | AdminApiError> {
+    return this.authed<void>('DELETE', `/exemptions/${encodeURIComponent(id)}`).pipe(
+      map((result) => (isAdminError(result) ? result : { deleted: true as const })),
+    );
+  }
+
+  listExemptions(): Observable<ExemptionRecord[] | AdminApiError> {
+    return this.authed<ExemptionRecord[]>('GET', '/exemptions');
+  }
+
+  /** Registered demo routes with the policies that apply, from the backend's own matcher. */
+  demoRoutes(): Observable<DemoRouteCatalogResponse | AdminApiError> {
+    return this.authed<DemoRouteCatalogResponse>('GET', '/demo-routes');
+  }
+
+  createExemption(edit: ExemptionEdit): Observable<AdminPolicy | AdminApiError> {
+    return this.authed<AdminPolicy>('POST', '/exemptions', edit);
   }
 
   private authed<T>(method: string, path: string, body?: unknown): Observable<T | AdminApiError> {

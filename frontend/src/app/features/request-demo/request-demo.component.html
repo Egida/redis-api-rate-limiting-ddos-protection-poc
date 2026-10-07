@@ -1,36 +1,120 @@
 <section class="demo" aria-labelledby="demo-heading">
   <h2 id="demo-heading">Run request demo</h2>
   <p class="note">
-    Requests go to this local POC only, one at a time. Past the configured limit the API answers
-    <strong>429</strong> on purpose &mdash; that is the behaviour being demonstrated.
+    Each entry is one policy you configured. Requests go to this local POC only, one at a time. Past
+    the configured limit the API answers <strong>429</strong> on purpose &mdash; that is the behaviour
+    being demonstrated.
   </p>
 
-  @if (catalogError()) {
-    <p class="alert alert-warn" role="alert">{{ catalogError() }}</p>
+  @if (loadError(); as error) {
+    <p class="alert alert-bad" role="alert">Policy targets could not be loaded: {{ error }}</p>
+    <button type="button" class="primary" (click)="refresh()" [disabled]="running()">Retry targets</button>
   }
 
-  @if (!catalogLoaded()) {
-    <p role="status">Loading demo catalog&hellip;</p>
-  } @else if (routes().length === 0) {
-    <p class="empty">No demo-capable routes are configured.</p>
-  } @else {
-    <div class="route-note" role="note">{{ route()?.note }}</div>
+  <div class="catalog-head">
+    @if (loading()) {
+      <p role="status">Loading your policies&hellip;</p>
+    } @else {
+      <p class="source">
+        One entry per policy from the Policies workspace; the request target and the policies that
+        apply are resolved by the limiter itself.
+      </p>
+    }
+    <button type="button" class="secondary" (click)="refresh()" [disabled]="running() || loading()">
+      Refresh targets
+    </button>
+  </div>
+
+  @if (!loading() && targets().length === 0 && !loadError()) {
+    <p class="empty">You have no policies configured, so there is nothing to test.</p>
   }
 
-  <form class="controls" (submit)="$event.preventDefault(); onStart()" [class.hidden]="!catalogLoaded() || routes().length === 0">
+  @if (target(); as selected) {
+    <div class="route-detail">
+      <p class="route-note" role="note">{{ selected.note }}</p>
+      @if (selected.enabled && selected.testable) {
+        <p class="help">
+          The console sends <code>{{ selected.method }} {{ selected.concretePath }}{{ selected.sampleQuery ? '?' + selected.sampleQuery : '' }}</code>
+          to exercise <strong>{{ selected.policyId }}</strong>
+          ({{ selected.configuredMethod }} {{ selected.configuredPath ?? selected.scope }}).
+          @if (!selected.matchedHandler) {
+            <strong>No handler serves that path,</strong> so the limiter's answer is what matters: it
+            runs before routing. Any 404 comes from downstream routing and is reported on its own.
+          }
+        </p>
+      } @else {
+        <p class="alert alert-warn" role="alert">{{ selected.reason }}</p>
+      }
+
+      @if (enforcedWith().length === 0) {
+        <p class="empty">
+          Nothing is charged for this request: this policy is the only one that matched, and it is
+          not enabled.
+        </p>
+      } @else {
+        <p class="help">
+          {{ enforcedWith().length }} polic{{ enforcedWith().length === 1 ? 'y is' : 'ies are' }}
+          enforced together on every request and each one must allow it. Selecting
+          <strong>{{ selected.policyId }}</strong> does not isolate it. Limits are not comparable
+          across algorithms, so each is listed with its own parameters.
+        </p>
+        <ul class="policy-list">
+          @for (policy of enforcedWith(); track policy.id) {
+            <li [class.focused]="policy.id === selected.policyId">
+              <strong>{{ policy.id }}</strong>
+              <span class="policy-meta">{{ policy.algorithm }} &middot; {{ policy.scope }}</span>
+              <span class="policy-params">{{ policy.parameterSummary }}</span>
+            </li>
+          }
+        </ul>
+      }
+
+      @if (exemptions().length > 0) {
+        <p class="help">
+          Exempted by {{ exemptions().join(', ') }}: requests to this target bypass every policy above,
+          so no limit will be enforced.
+        </p>
+      }
+    </div>
+  }
+
+  @if (untestable().length > 0) {
+    <details class="unprobeable">
+      <summary>{{ untestable().length }} polic{{ untestable().length === 1 ? 'y cannot' : 'ies cannot' }} be tested automatically</summary>
+      <ul>
+        @for (entry of untestable(); track entry.id) {
+          <li>
+            <strong>{{ entry.policyId }}</strong>
+            <code>{{ targetId2Configured().get(entry.id) }}</code>
+            &mdash; {{ entry.reason }}
+          </li>
+        }
+      </ul>
+    </details>
+  }
+
+  <form class="controls" (submit)="$event.preventDefault(); onStart()" [class.hidden]="targets().length === 0">
     <div class="field">
-      <label for="demo-route">Route</label>
+      <label for="demo-target">Policy to test</label>
       <select
-        id="demo-route"
-        name="route"
-        [ngModel]="routeId()"
-        (ngModelChange)="routeId.set($event)"
-        [disabled]="running()"
+        id="demo-target"
+        name="target"
+        [value]="target()?.id ?? ''"
+        (change)="onTargetChange($event)"
+        [disabled]="running() || loading() || targets().length === 0"
       >
-        @for (r of routes(); track r.id) {
-          <option [value]="r.id">{{ r.label }} &mdash; {{ publicPolicies().find(p => p.method === r.method && p.path === r.path)?.limit ? publicPolicies().find(p => p.method === r.method && p.path === r.path)?.limit + ' per minute' : 'live limit unknown' }}</option>
+        @if (targets().length === 0) {
+          <option value="" selected>
+            {{ loading() ? 'Loading policy targets…' : loadError() ? 'Targets unavailable' : 'No policies configured' }}
+          </option>
+        }
+        @for (t of targets(); track t.id) {
+          <option [value]="t.id">{{ targetId2Label().get(t.id) }}</option>
         }
       </select>
+      @if (target(); as selected) {
+        <p class="hint">Sends {{ selected.method }} {{ selected.concretePath }}.</p>
+      }
     </div>
 
     <div class="field">
@@ -46,7 +130,7 @@
         (ngModelChange)="onCountChange($event)"
         [disabled]="running()"
       />
-      <p class="hint">Default 20, maximum {{ maxCount }}.</p>
+      <p class="hint">Default 20, maximum {{ maxCount }}, sent one at a time.</p>
     </div>
 
     @if (needsAuth()) {
@@ -76,7 +160,7 @@
     }
 
     <div class="actions">
-      <button type="submit" class="primary" [disabled]="running()">
+      <button type="submit" class="primary" [disabled]="running() || !target()?.testable">
         {{ running() ? 'Running…' : 'Start demo' }}
       </button>
       <button type="button" (click)="onCancel()" [disabled]="!running()">Cancel</button>
@@ -109,9 +193,12 @@
     <div class="result" [class.inconclusive]="result.inconclusive">
       <h3>Observed result</h3>
       <ul>
-        <li>Sent {{ result.totalSent }} request{{ result.totalSent === 1 ? '' : 's' }} to {{ route().label }}.</li>
+        <li>Sent {{ result.totalSent }} request{{ result.totalSent === 1 ? '' : 's' }} to {{ lastRunLabel() }}.</li>
         <li>Allowed (2xx): {{ result.success }}</li>
         <li>Rejected (429): {{ result.rejected }}</li>
+        @if (result.notFound > 0) {
+          <li>No handler (404): {{ result.notFound }}</li>
+        }
         <li>Other responses: {{ result.error }}</li>
         <li>
           @if (result.first429Index !== null) {
@@ -121,6 +208,13 @@
           }
         </li>
         <li>Elapsed: {{ (result.elapsedMs / 1000).toFixed(1) }}s</li>
+        @if (result.notFound > 0) {
+          <li class="compare">
+            <strong>Counted separately:</strong> the 404s are downstream routing answers, not limiter
+            answers. The limiter runs before routing, so those requests were still charged &mdash; which
+            is why the run continued past them instead of stopping.
+          </li>
+        }
         <li>
           @if (result.cancelled) {
             Run cancelled.
@@ -130,21 +224,6 @@
             Run stopped early.
           }
         </li>
-<li class="compare">
-            @if (result.first429Index !== null) {
-              First 429 observed at request #{{ result.first429Index }}.
-              @if (liveLimit() !== null && liveLimit()! > 0) {
-                <span class="compare-note">
-                  (Live limit: {{ liveLimit() }} per window; a different index usually means the window rolled over or the route was partly used.)
-                </span>
-              }
-            } @else {
-              No 429 observed.
-              @if (liveLimit() !== null && liveLimit()! > 0) {
-                <span class="compare-note"> (Live limit: {{ liveLimit() }} per window.)</span>
-              }
-            }
-          </li>
       </ul>
       <p class="result-note">
         Browser-observed since this page opened. Statuses &mdash; {{ statusBreakdown() || 'none' }}.

@@ -699,7 +699,7 @@ per policy, decoded with `cjson`.
 | Exact sliding window | Sorted set `rate-limit:v1:sw:<policy>:<type>:<hash>` | events in trailing window `>= limit` denies | oldest event expiry |
 | Sliding-window counter | Current + previous counters `rate-limit:v1:sc:<policy>:<type>:<hash>:w{index}` | `current + previous × (1 − elapsed/window) >= limit` denies; approximate | window end |
 | Token bucket | Hash `{tok, ts}` at `rate-limit:v1:tb:<policy>:<type>:<hash>` | balance `< cost` denies | time to afford cost |
-| Leaky bucket (policing) | Depth counter `rate-limit:v1:lb:<policy>:<type>:<hash>` | depth `>= queueCapacity` denies | drain horizon TTL |
+| Leaky bucket (policing) | Water level + last Redis timestamp, `rate-limit:v1:lb:<policy>:<type>:<hash>` | level drains continuously at `drainRate`; request denies if adding one exceeds `queueCapacity` | time until enough capacity drains |
 | Concurrency limit | Set of lease ids `rate-limit:v1:cc:<policy>:<type>:<hash>` | held `>= maxConcurrent` denies | lease TTL |
 
 Namespaces: `rate-limit:v1:{sw,sc,tb,lb,cc}:*` (algorithm state),

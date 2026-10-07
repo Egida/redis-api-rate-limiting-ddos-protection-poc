@@ -21,17 +21,21 @@ import org.springframework.web.bind.annotation.RestController;
 public class DemoController {
 
     @GetMapping("/products")
+    @DemoCallable(sampleQuery = "page=1", note = "Public read route. Query parameters are optional, so the demo sends page=1.")
     public Map<String, Object> products(@RequestParam(defaultValue = "1") int page) {
         return Map.of("items", List.of("widget", "gadget"), "page", page);
     }
 
     @PostMapping("/login")
+    @DemoCallable(sampleQuery = "user=demo",
+            note = "Safe POC endpoint: returns a disposable demo token only; it does not authenticate a real user or change persistent data.")
     public Map<String, Object> login(@RequestParam(defaultValue = "alice") String user) {
         // Not a real authentication endpoint; returns a throwaway token.
         return Map.of("user", user, "token", "poc-token-" + user);
     }
 
     @PostMapping("/orders")
+    @DemoCallable(requiresCredentials = true, note = "Requires HTTP Basic credentials: a USER-scoped policy only charges a real principal when the request authenticates.")
     public Map<String, Object> orders(@AuthenticationPrincipal UserDetails principal) {
         return Map.of("orderId", "ord-" + Math.abs(principal.getUsername().hashCode()),
                 "placedBy", principal.getUsername());
@@ -51,6 +55,8 @@ public class DemoController {
      *             on the error path as well as on success
      */
     @GetMapping("/work")
+    @DemoCallable(sampleQuery = "ms=200",
+            note = "Sleeps up to 2000 ms while holding a concurrency permit, so runs against it take longer than the others.")
     public Map<String, Object> work(@RequestParam(defaultValue = "200") int ms,
             @RequestParam(defaultValue = "false") boolean fail)
             throws InterruptedException {

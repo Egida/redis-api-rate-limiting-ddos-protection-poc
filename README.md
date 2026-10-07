@@ -60,7 +60,9 @@ Everything below was run and observed on this machine. Numbers are measured, not
 1. Client calls a protected route.
 2. `RateLimitInterceptor` resolves the **identity** — client IP by default, authenticated user
    when the request carries a session.
-3. The **policy** for that route + method is looked up. Unknown routes are not limited.
+3. An **exemption** for that route + method is checked first. If one matches, the request proceeds
+   untouched — no quota is charged, bypassing even GLOBAL/APPLICATION policies. Otherwise the
+   **policy** for that route + method is looked up. Unknown routes are not limited.
 4. `INCR ratelimit:{policy}:{identity}` in Redis. The first increment of a window also sets the TTL.
 5. `count > limit` → **429 Too Many Requests** with `Retry-After`, `X-RateLimit-Limit`,
    `X-RateLimit-Remaining`, `X-RateLimit-Policy`. Otherwise the request proceeds untouched.
@@ -87,6 +89,28 @@ principal), and **GLOBAL** / **APPLICATION** (one shared quota across all in-sco
 of IP or user). `GLOBAL` is the legacy name; `APPLICATION` is the same behavior with a clearer label.
 Existing `GLOBAL` policies keep working unchanged.
 
+**Exemptions** are separate rules, not zero-limit policies: the create-policy form has an
+"Exclude this API from rate limiting" checkbox that stores a distinct exemption for the selected
+method and path (own Redis namespace `ratelimit:exemption:v1`, managed under
+`/api/admin/rate-limit/exemptions`). Matching requests bypass **all** rate-limit policies,
+including GLOBAL/APPLICATION. `/**` and admin/actuator routes are rejected at validation.
+
+**Overview reads the same live policies.** The policy table is built from the authenticated
+managed-policies API, never from `application.yml` or a fixed catalog, and shows a loading,
+error+retry or empty state instead of sample rows.
+
+**The request demo offers real routes.** `GET /api/admin/rate-limit/demo-routes` is generated from
+Spring's registered handler mappings: only methods annotated `@DemoCallable` appear, so a route in the
+dropdown provably exists. Unannotated routes (admin, actuator, policy control) are absent by
+construction; a route that exists but must not be replayed (`@DemoCallable(repeatable = false)`) is
+listed with the reason. Each entry carries the policies that actually apply, resolved by
+`PolicyMatcher.matching` — the same call the filter uses — so method rules, `ANY`, wildcards,
+GLOBAL/APPLICATION scopes, the enabled flag and exemptions cannot disagree with enforcement. The
+dropdown shows one option per route with its policy count, and each policy's own algorithm, scope and
+parameters are listed separately because limits are not comparable across algorithms. Enabled
+policies whose path matches no handler are reported separately: a policy does not prove an API
+exists, and a mistyped path can never be offered as a live route.
+
 ---
 
 ## 4. Run it
@@ -94,6 +118,30 @@ Existing `GLOBAL` policies keep working unchanged.
 ### Prerequisites
 
 Java 21, Maven 3.9, Node 20+, Docker (for Redis).
+
+### Start and stop (Windows)
+
+Run the repository script from PowerShell:
+
+```powershell
+.\start.bat
+```
+
+For this local POC, `start.bat` supplies `pocadmin` / `admin123` to the backend. These credentials
+are intentionally demo-only and must not be used for a deployed or shared environment.
+
+`start.bat` reuses the project's existing Redis container and data, builds the backend from current
+source, starts the backend and Angular console in the background, waits for both health checks, and
+opens the console. If the backend is already running, stop it first so an old JVM cannot keep serving
+an earlier JAR.
+
+```powershell
+.\stop.bat
+```
+
+`stop.bat` stops the tracked backend/frontend processes and the project Redis container. It does not
+delete the container or its data. Processes started manually are left alone unless they use the
+legacy RateGuard window titles from the previous `start.bat`.
 
 ### 1. Redis
 
@@ -120,6 +168,10 @@ npm start
 
 Opens on `4200` and proxies API calls to `8080` (see `frontend/proxy.conf.json`), so the browser
 stays same-origin and there is no CORS configuration to get wrong.
+
+The Policies workspace loads **capabilities**, **policies** and **exemptions** independently. A
+failing section shows its own error with its own `Retry` button and never hides the sections that
+did load, and the editor refuses to save a policy while algorithm/scope options are missing.
 
 ### Verification and demo scripts
 

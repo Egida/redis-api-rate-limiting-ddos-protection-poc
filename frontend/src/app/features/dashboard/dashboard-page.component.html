@@ -46,10 +46,10 @@
       <h3>Active policies</h3>
       <p class="metric">{{ policyCount() ?? '—' }}</p>
       <p class="detail">
-        @if (usingSamplePolicies()) {
-          Unknown — showing sample rows
+        @if (policiesError()) {
+          Unknown — live policies could not be loaded
         } @else {
-          Read from the API
+          Stored in shared Redis, editable in the Policies workspace
         }
       </p>
     </li>
@@ -58,13 +58,14 @@
 
 <section aria-labelledby="policies-heading">
   <h2 id="policies-heading">Rate-limit policies</h2>
-  @if (usingSamplePolicies()) {
+  @if (policiesError(); as error) {
     <p class="source sample">
-      <strong>Sample policy configuration.</strong> The API could not be reached, so these are the
-      shipped defaults from <code>application.yml</code>, not live data.
+      <strong>Live policies unavailable:</strong> {{ error }} Nothing is shown here rather than
+      falling back to the shipped defaults.
     </p>
+    <button type="button" class="pill" (click)="retryPolicies()">Retry policies</button>
   } @else {
-    <p class="source">Read from the API — read-only.</p>
+    <p class="source">Read from the managed policy API &mdash; the same rows the Policies workspace edits.</p>
   }
 
   <div class="table-scroll">
@@ -72,33 +73,42 @@
       <caption class="visually-hidden">Configured rate-limit policies</caption>
       <thead>
           <tr>
+            <th scope="col">Policy</th>
             <th scope="col">Route</th>
             <th scope="col">Method</th>
             <th scope="col">Algorithm</th>
-            <th scope="col">Limit</th>
-            <th scope="col">Window</th>
-            <th scope="col">Identity</th>
+            <th scope="col">Parameters</th>
+            <th scope="col">Scope</th>
             <th scope="col">Redis failure mode</th>
+            <th scope="col">State</th>
           </tr>
         </thead>
       <tbody>
-        @if (loading() && !snapshot()) {
-          <tr><td colspan="7" class="muted">Loading…</td></tr>
+        @if (policiesLoading()) {
+          <tr><td colspan="8" class="muted">Loading policies&hellip;</td></tr>
+        } @else if (policies().length === 0) {
+          <tr>
+            <td colspan="8" class="muted">
+              No policies are stored. Create one in the
+              <a routerLink="/policies">Policies workspace</a>.
+            </td>
+          </tr>
         } @else {
           @for (policy of policies(); track policy.id) {
             <tr>
-              <td class="mono">{{ policy.path ?? '(all routes)' }}</td>
+              <td class="mono">{{ policy.id }}</td>
+              <td class="mono">{{ policy.path ?? '(every route)' }}</td>
               <td>{{ policy.method }}</td>
-              <td>{{ policy.algorithm ?? '—' }}</td>
-              <td>{{ policy.limit === null ? '—' : policy.limit }}</td>
-              <td>{{ policy.windowSeconds === null ? '—' : formatWindow(policy.windowSeconds) }}</td>
-              <td>{{ identityLabel(policy.identity) }}</td>
+              <td>{{ policy.algorithm }}</td>
+              <td>{{ policy.parameterSummary || '—' }}</td>
+              <td>{{ identityLabel(policy.scope) }}</td>
               <td>
                 <span
                   class="pill"
-                  [class.closed]="policy.redisFailureMode === 'FAIL_CLOSED'"
-                >{{ policy.redisFailureModeLabel }}</span>
+                  [class.closed]="policy.onRedisError === 'FAIL_CLOSED'"
+                >{{ policy.onRedisError === 'FAIL_CLOSED' ? 'Fail closed' : 'Fail open' }}</span>
               </td>
+              <td>{{ policy.enabled ? 'On' : 'Off' }} &middot; v{{ policy.version }}</td>
             </tr>
           }
         }

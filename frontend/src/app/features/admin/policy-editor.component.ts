@@ -69,6 +69,7 @@ export class PolicyEditorComponent implements OnInit {
   protected readonly fMaxConcurrent = signal(10);
   protected readonly fLeaseSeconds = signal(30);
   protected readonly fEnabled = signal(true);
+  protected readonly fExempt = signal(false);
   protected readonly fFailureMode = signal<'' | 'FAIL_OPEN' | 'FAIL_CLOSED'>('');
   protected readonly fVersion = signal(1);
   protected readonly fieldErrors = signal<string[]>([]);
@@ -115,10 +116,22 @@ export class PolicyEditorComponent implements OnInit {
     this.fieldErrors.set(problems);
     if (problems.length > 0) return;
 
-    const failureMode = this.fFailureMode();
     const id = this.fId().trim();
     this.store.busy.set(true);
     try {
+      if (this.fExempt()) {
+        const result = await this.store.saveExemption({
+          id,
+          name: this.fName().trim() || id,
+          method: this.fMethod(),
+          path: this.fPath().trim(),
+          enabled: this.fEnabled(),
+        });
+        if (!('status' in result)) this.onClose();
+        return;
+      }
+
+      const failureMode = this.fFailureMode();
       const saved = await this.store.save(
         {
           id,
@@ -142,7 +155,6 @@ export class PolicyEditorComponent implements OnInit {
         },
         this.isCreate() ? null : id,
       );
-      // Stay open on failure so the operator can correct the input; close once the server accepted it.
       if (!('status' in saved)) this.onClose();
     } finally {
       this.store.busy.set(false);
@@ -154,6 +166,27 @@ export class PolicyEditorComponent implements OnInit {
     const problems: string[] = [];
     if (this.isCreate() && !/^[a-z0-9][a-z0-9-]{0,62}$/.test(this.fId().trim())) {
       problems.push('Id must start with a letter or digit and use only a-z, 0-9 and hyphens.');
+    }
+    if (this.fExempt()) {
+      if (!this.fPath().trim().startsWith('/')) {
+        problems.push('Path must start with /');
+      }
+      if (this.fPath().trim() === '/**') {
+        problems.push('Path /** is too broad; use a specific route');
+      }
+      if (this.fPath().trim().startsWith('/api/admin') || this.fPath().trim().startsWith('/actuator')) {
+        problems.push('Exemptions cannot target admin or actuator routes');
+      }
+      return problems;
+    }
+    // Algorithm and scope come from /capabilities: refuse to save rather than send invented values.
+    if (!this.store.capabilitiesReady()) {
+      problems.push(
+        this.store.capabilitiesState().error
+          ? 'Algorithm and scope options could not be loaded. Close the editor and retry.'
+          : 'Algorithm and scope options are still loading. Try again in a moment.',
+      );
+      return problems;
     }
     if (this.fScope() !== 'GLOBAL' && this.fScope() !== 'APPLICATION' && !this.fPath().trim().startsWith('/')) {
       problems.push('Path must start with / — only a GLOBAL policy omits it.');

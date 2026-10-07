@@ -311,6 +311,79 @@ class RedisRateLimitStoreTest {
     }
 
     @Test
+    void leakyBucketDrainsGraduallyAtConfiguredRate() throws InterruptedException {
+        var now = java.time.Instant.now();
+        var leaky = com.example.ratelimit.policy.PolicyDocument.builder("lb-gradual")
+                .name("lb-gradual").route("GET", "/api/lb-gradual")
+                .algorithm(com.example.ratelimit.policy.Algorithm.LEAKY_BUCKET)
+                .scope(com.example.ratelimit.policy.Scope.IP)
+                .leaky(2, 2)
+                .version(1).timestamps(now, now).build();
+        String key = store.stateKey(leaky, "IP", "10.0.4.2", T0);
+
+        assertThat(store.consumeAll(charge(leaky, "10.0.4.2"), T0).allowed()).isTrue();
+        assertThat(store.consumeAll(charge(leaky, "10.0.4.2"), T0).allowed()).isTrue();
+        assertThat(store.consumeAll(charge(leaky, "10.0.4.2"), T0).allowed())
+                .as("full bucket rejects immediately")
+                .isFalse();
+
+        // At 2 requests/second, 600ms drains about 1.2 requests. One more fits, but an
+        // immediate following request does not. A fixed-expiry counter would still reject both.
+        Thread.sleep(600);
+        assertThat(store.consumeAll(charge(leaky, "10.0.4.2"), T0).allowed())
+                .as("available capacity recovers continuously, before the old TTL horizon")
+                .isTrue();
+        assertThat(store.consumeAll(charge(leaky, "10.0.4.2"), T0).allowed())
+                .as("the accepted request adds a full unit back to the bucket")
+                .isFalse();
+
+        String state = redis.opsForValue().get(key);
+        assertThat(state).matches("\\d+:\\d+");
+        Long ttl = redis.getExpire(key, java.util.concurrent.TimeUnit.MILLISECONDS);
+        assertThat(ttl).isNotNull().isPositive();
+    }
+
+    @Test
+    void leakyBucketMigratesLegacyCounterWithoutDroppingDebt() {
+        var now = java.time.Instant.now();
+        var leaky = com.example.ratelimit.policy.PolicyDocument.builder("lb-legacy")
+                .name("lb-legacy").route("GET", "/api/lb-legacy")
+                .algorithm(com.example.ratelimit.policy.Algorithm.LEAKY_BUCKET)
+                .scope(com.example.ratelimit.policy.Scope.IP)
+                .leaky(2, 3)
+                .version(1).timestamps(now, now).build();
+        String key = store.stateKey(leaky, "IP", "10.0.4.3", T0);
+        redis.opsForValue().set(key, "1", Duration.ofSeconds(3));
+
+        assertThat(store.consumeAll(charge(leaky, "10.0.4.3"), T0).allowed()).isTrue();
+        assertThat(redis.opsForValue().get(key)).startsWith("2000:");
+        assertThat(store.consumeAll(charge(leaky, "10.0.4.3"), T0).allowed())
+                .as("the migrated prior request still consumes its capacity")
+                .isFalse();
+    }
+
+    @Test
+    void leakyBucketDenialDoesNotChargeEarlierPolicyInAtomicBatch() {
+        var now = java.time.Instant.now();
+        var fixed = docPolicy("lb-batch-fixed", 5, Duration.ofMinutes(1));
+        var leaky = com.example.ratelimit.policy.PolicyDocument.builder("lb-batch-full")
+                .name("lb-batch-full").route("GET", "/api/lb-batch-full")
+                .algorithm(com.example.ratelimit.policy.Algorithm.LEAKY_BUCKET)
+                .scope(com.example.ratelimit.policy.Scope.IP)
+                .leaky(1, 1)
+                .version(1).timestamps(now, now).build();
+        var fixedCharge = new RateLimitStore.Charge(fixed, "IP", "10.0.4.4");
+        var leakyCharge = new RateLimitStore.Charge(leaky, "IP", "10.0.4.4");
+        assertThat(store.consumeAll(java.util.List.of(leakyCharge), T0).allowed()).isTrue();
+
+        var denied = store.consumeAll(java.util.List.of(fixedCharge, leakyCharge), T0);
+
+        assertThat(denied.allowed()).isFalse();
+        assertThat(denied.blockedIndex()).isEqualTo(1);
+        assertThat(redis.opsForValue().get(store.stateKey(fixed, "IP", "10.0.4.4", T0))).isNull();
+    }
+
+    @Test
     void concurrencyLimitCapsAndReleases() {
         var now = java.time.Instant.now();
         var concurrent = com.example.ratelimit.policy.PolicyDocument.builder("cc-cap")

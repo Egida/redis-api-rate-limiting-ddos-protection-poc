@@ -1,33 +1,9 @@
-import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, input } from '@angular/core';
 import { RouterLink } from '@angular/router';
 
 import { OverviewSnapshot } from '../../core/dashboard-api.service';
 import { formatWindow } from '../../core/demo-catalog';
-import { PolicySummary } from '../../core/models';
-
-interface FallbackPolicy extends PolicySummary {
-  readonly sample: true;
-}
-
-/** Shipped defaults, used only when the API cannot be reached. Rendered with an explicit label. */
-const SAMPLE_POLICIES: FallbackPolicy[] = [
-  { id: 'products-read', method: 'GET', path: '/api/products', limit: 100, windowSeconds: 60, identity: 'IP', algorithm: 'FIXED_WINDOW', scope: 'IP', parameterSummary: '100 per 1 minute', enabled: true, version: 1, redisFailureMode: 'FAIL_OPEN', redisFailureModeLabel: 'Fail open', sample: true },
-  { id: 'login-attempt', method: 'POST', path: '/api/login', limit: 10, windowSeconds: 60, identity: 'IP', algorithm: 'FIXED_WINDOW', scope: 'IP', parameterSummary: '10 per 1 minute', enabled: true, version: 1, redisFailureMode: 'FAIL_CLOSED', redisFailureModeLabel: 'Fail closed', sample: true },
-  { id: 'order-create', method: 'POST', path: '/api/orders', limit: 30, windowSeconds: 60, identity: 'USER', algorithm: 'FIXED_WINDOW', scope: 'USER', parameterSummary: '30 per 1 minute', enabled: true, version: 1, redisFailureMode: 'FAIL_OPEN', redisFailureModeLabel: 'Fail open', sample: true },
-];
-
-/**
- * A backend older than the managed-metadata change omits algorithm, scope and parameterSummary.
- * Rather than print a blank cell, fall back to values the console already has for that policy.
- */
-function withDerivedFields(policy: PolicySummary): PolicySummary {
-  return {
-    ...policy,
-    algorithm: policy.algorithm ?? '—',
-    scope: policy.scope ?? '—',
-    parameterSummary: policy.parameterSummary ?? null,
-  };
-}
+import { AdminStore } from '../../core/admin-store.service';
 
 @Component({
   selector: 'app-dashboard-page',
@@ -38,6 +14,8 @@ function withDerivedFields(policy: PolicySummary): PolicySummary {
   styleUrl: './dashboard-page.component.scss',
 })
 export class DashboardPageComponent {
+  private readonly store = inject(AdminStore);
+
   // App owns the single polling loop and passes the snapshot down, so the page never fetches again.
   readonly snapshot = input<OverviewSnapshot | null>(null);
 
@@ -57,24 +35,28 @@ export class DashboardPageComponent {
     return snapshot.health.value.state === 'healthy' ? 'Connected' : 'Unavailable';
   });
 
-  readonly policies = computed<PolicySummary[]>(() => {
-    const result = this.snapshot()?.policies;
-    if (result?.available) return result.value.policies.map(withDerivedFields);
-    return SAMPLE_POLICIES;
-  });
+  /** The live managed policies. There is no sample fallback: an unavailable API stays empty. */
+  readonly policies = computed(() => this.store.policies());
+  readonly policiesLoading = computed(() => !this.store.policiesState().loaded);
+  readonly policiesError = computed(() => this.store.policiesState().error);
+  readonly policyCount = computed(() => (this.policiesError() ? null : this.policies().length));
 
-  readonly usingSamplePolicies = computed(() => !this.snapshot()?.policies.available);
-  readonly policyCount = computed(() => this.snapshot()?.policies.available ? this.snapshot()!.policies.value.policyCount : null);
+  retryPolicies(): void {
+    void this.store.loadPolicies();
+  }
+
   readonly allowedShare = computed(() => {
     const snapshot = this.snapshot();
     if (!snapshot?.countersAvailable || snapshot.total === 0) return 0;
     return Math.round((snapshot.allowed / snapshot.total) * 100);
   });
+
   readonly rejectedShare = computed(() => {
     const snapshot = this.snapshot();
     if (!snapshot?.countersAvailable || snapshot.total === 0) return 0;
     return Math.round((snapshot.rejected / snapshot.total) * 100);
   });
+
   readonly redisErrorShare = computed(() => {
     const snapshot = this.snapshot();
     if (!snapshot?.countersAvailable || snapshot.total === 0) return 0;
@@ -85,14 +67,16 @@ export class DashboardPageComponent {
     return formatWindow(seconds);
   }
 
-  identityLabel(identity: string): string {
-    switch (identity) {
+  identityLabel(scope: string): string {
+    switch (scope) {
       case 'USER':
         return 'Authenticated user';
       case 'GLOBAL':
         return 'Shared global quota';
       case 'APPLICATION':
         return 'Shared across all routes';
+      case 'ENDPOINT':
+        return 'This route only';
       default:
         return 'Client IP';
     }

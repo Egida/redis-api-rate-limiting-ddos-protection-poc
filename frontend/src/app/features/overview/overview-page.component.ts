@@ -18,13 +18,12 @@ import { RequestDemoComponent } from '../request-demo/request-demo.component';
 })
 export class OverviewPageComponent {
   protected readonly status = inject(StatusService);
-  private readonly adminStore = inject(AdminStore);
+  protected readonly adminStore = inject(AdminStore);
 
   constructor() {
     this.status.prime();
-    // Load admin store so live policy limits are available for the demo dropdown
-    if (!this.adminStore.loaded()) {
-      void this.adminStore.load();
-    }
+    // Always re-read: an admin may have created, edited or deleted policies since the last visit.
+    void this.adminStore.loadPolicies();
+    void this.adminStore.loadCapabilities();
   }
 }

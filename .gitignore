@@ -4,6 +4,7 @@ node_modules/
 dist/
 .angular/
 coverage/
+/.run-state/
 
 # Local agent / editor wiring for this machine.
 # These hardcode absolute paths (e.g. C:\Users\<name>\Downloads\...) and are

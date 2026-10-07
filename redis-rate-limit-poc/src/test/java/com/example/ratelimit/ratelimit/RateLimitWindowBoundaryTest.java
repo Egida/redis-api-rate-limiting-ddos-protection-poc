@@ -135,7 +135,13 @@ class RateLimitWindowBoundaryTest {
                         properties.getOnRedisError()),
                 new RateLimitIdentityResolver(properties),
                 new RateLimitMetrics(new SimpleMeterRegistry()),
-                properties, new ObjectMapper(), clock);
+                properties, new ObjectMapper(), clock,
+                new com.example.ratelimit.policy.ExemptionStore(null, new ObjectMapper()) {
+                    @Override
+                    public java.util.List<com.example.ratelimit.policy.ExemptionDocument> findAll() {
+                        return java.util.List.of();
+                    }
+                });
     }
 
     private MockHttpServletResponse get(RateLimitFilter filter, long millis, String clientIp)

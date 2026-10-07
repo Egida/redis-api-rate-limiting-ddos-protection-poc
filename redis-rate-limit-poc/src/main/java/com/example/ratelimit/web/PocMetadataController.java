@@ -74,33 +74,6 @@ public class PocMetadataController {
                 "policies", policies);
     }
 
-    /** Authoritative catalog of endpoints the request-demo can safely call. */
-    @GetMapping("/demo-catalog")
-    public Map<String, Object> demoCatalog() {
-        List<Map<String, Object>> entries = new ArrayList<>();
-        entries.add(demoEntry("products", "GET /api/products", "GET", "/api/products", false,
-                "Public read route, limited per client IP."));
-        entries.add(demoEntry("login", "POST /api/login", "POST", "/api/login", false,
-                "Credential route, fails closed while Redis is down. The controller takes an optional ?user= query parameter and no request body, so this demo sends no payload."));
-        entries.add(demoEntry("orders", "POST /api/orders", "POST", "/api/orders", true,
-                "Authenticated route, limited per authenticated user. Enter HTTP Basic credentials below; they are held in memory for this run only and are never stored or logged."));
-        entries.add(demoEntry("work", "GET /api/work", "GET", "/api/work", false,
-                "Slow stand-in for concurrency demos. Accepts ?ms= (max 2000) and ?fail=true."));
-        return Map.of("source", "backend", "editable", false, "entries", entries);
-    }
-
-    private static Map<String, Object> demoEntry(String id, String label, String method, String path,
-            boolean needsAuth, String note) {
-        Map<String, Object> e = new LinkedHashMap<>();
-        e.put("id", id);
-        e.put("label", label);
-        e.put("method", method);
-        e.put("path", path);
-        e.put("needsAuth", needsAuth);
-        e.put("note", note);
-        return e;
-    }
-
     /** One managed policy, in the shape the console table binds to. Nulls stay null: a token bucket
      * has no window, a concurrency policy has no request limit, and the table renders that honestly
      * instead of inventing a number. */

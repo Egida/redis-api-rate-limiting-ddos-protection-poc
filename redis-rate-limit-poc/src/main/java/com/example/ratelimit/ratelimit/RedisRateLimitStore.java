@@ -16,12 +16,11 @@ import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 /**
- * Fixed-window counter in Redis, decided entirely inside one Lua script.
+ * Redis-backed rate-limit state, decided entirely inside one Lua script.
  *
- * <p>The script does INCR + conditional PEXPIRE + TTL read as a single Redis-side operation, so two
- * app instances cannot both observe the pre-increment value, and a window can never be created
- * without an expiry. Fixed window means a client may fire up to 2x the limit across a window
- * boundary; that is accepted and documented for this POC.
+ * <p>All policy decisions run in Redis Lua, so concurrent app instances share atomic state changes.
+ * Each algorithm assigns a TTL to its state. Fixed window means a client may fire up to 2x the
+ * limit across a window boundary; that is accepted and documented for this POC.
  */
 @Component
 public class RedisRateLimitStore implements RateLimitStore {
@@ -112,12 +111,41 @@ public class RedisRateLimitStore implements RateLimitStore {
                   return {0, i, math.max(1, math.ceil(wait / 1000)), p.capacity}
                 end
               elseif p.algo == 5 then
+                -- Water level is stored as milli-requests plus the last Redis timestamp. A legacy
+                -- integer counter is interpreted conservatively during rollout: a full old bucket
+                -- keeps its old expiry; a non-full one carries all its existing debt into v2.
                 local raw = redis.call('GET', KEYS[i])
-                local depth = raw and tonumber(raw) or 0
-                if depth >= p.queueCap then
-                  local ttl = redis.call('PTTL', KEYS[i])
-                  if ttl < 0 then ttl = p.windowMs end
-                  return {0, i, math.max(1, math.ceil(ttl / 1000)), p.queueCap}
+                local level = 0
+                local last = nowms
+                local legacyDepth = nil
+                if raw then
+                  local levelText, lastText = string.match(raw, '^(%d+):(%d+)$')
+                  if levelText then
+                    level = tonumber(levelText)
+                    last = tonumber(lastText)
+                  else
+                    legacyDepth = tonumber(raw)
+                    if not legacyDepth then
+                      local badTtl = redis.call('PTTL', KEYS[i])
+                      if badTtl < 0 then badTtl = p.windowMs end
+                      return {0, i, math.max(1, math.ceil(badTtl / 1000)), p.queueCap}
+                    end
+                    if legacyDepth >= p.queueCap then
+                      local ttl = redis.call('PTTL', KEYS[i])
+                      if ttl < 0 then ttl = p.windowMs end
+                      return {0, i, math.max(1, math.ceil(ttl / 1000)), p.queueCap}
+                    end
+                    level = legacyDepth * 1000
+                  end
+                end
+                if legacyDepth == nil then
+                  local elapsed = math.max(0, nowms - last)
+                  level = math.max(0, level - elapsed * p.drainRate)
+                end
+                local capacity = p.queueCap * 1000
+                if level + 1000 > capacity then
+                  local waitMs = math.ceil((level + 1000 - capacity) / p.drainRate)
+                  return {0, i, math.max(1, math.ceil(waitMs / 1000)), p.queueCap}
                 end
               elseif p.algo == 6 then
                 local held = redis.call('SCARD', KEYS[i])
@@ -165,11 +193,32 @@ public class RedisRateLimitStore implements RateLimitStore {
                 redis.call('PEXPIRE', KEYS[i], 2 * p.refillMs + p.graceMs)
                 if i == 1 then govLimit, govRemaining = p.capacity, math.max(0, math.floor(tokens)) end
               elseif p.algo == 5 then
-                local depth = redis.call('INCR', KEYS[i])
-                if depth == 1 then redis.call('PEXPIRE', KEYS[i], p.windowMs) end
-                local ttl = redis.call('PTTL', KEYS[i])
-                if ttl < 0 then redis.call('PEXPIRE', KEYS[i], p.windowMs) end
-                if i == 1 then govLimit, govRemaining = p.queueCap, math.max(0, p.queueCap - depth) end
+                local raw = redis.call('GET', KEYS[i])
+                local level = 0
+                local last = nowms
+                local legacyDepth = nil
+                if raw then
+                  local levelText, lastText = string.match(raw, '^(%d+):(%d+)$')
+                  if levelText then
+                    level = tonumber(levelText)
+                    last = tonumber(lastText)
+                  else
+                    legacyDepth = tonumber(raw)
+                    level = legacyDepth * 1000
+                  end
+                end
+                if legacyDepth == nil then
+                  local elapsed = math.max(0, nowms - last)
+                  level = math.max(0, level - elapsed * p.drainRate)
+                end
+                level = level + 1000
+                local ttl = math.max(1, math.ceil(level / p.drainRate)) + p.graceMs
+                local stored = string.format('%.0f:%.0f', level, nowms)
+                redis.call('SET', KEYS[i], stored, 'PX', ttl)
+                if i == 1 then
+                  govLimit = p.queueCap
+                  govRemaining = math.max(0, math.floor((p.queueCap * 1000 - level) / 1000))
+                end
               elseif p.algo == 6 then
                 redis.call('SADD', KEYS[i], p.member)
                 redis.call('PEXPIRE', KEYS[i], p.leaseMs)
@@ -330,8 +379,8 @@ public class RedisRateLimitStore implements RateLimitStore {
     /** Numbers-only JSON the batch script decodes with cjson. */
     private String paramsJson(com.example.ratelimit.policy.PolicyDocument policy, String member) {
         var algo = policy.algorithm();
-        // Leaky policing has no window; its counter TTL is the drain horizon, so overflow retries
-        // land when space plausibly exists. windowMs carries that horizon for this algorithm only.
+        // Leaky policing has no fixed window; windowMs carries its full-capacity drain horizon for
+        // malformed/legacy state recovery. Normal state expires at its current water-level drain time.
         long windowMs = policy.window() == null ? 0 : policy.window().toMillis();
         int cost = policy.cost() == null ? 1 : policy.cost();
         if (algo == com.example.ratelimit.policy.Algorithm.LEAKY_BUCKET) {

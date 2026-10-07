@@ -313,8 +313,10 @@ requests, cancellable) that reuses the demo runner.
 - **Token Bucket** — capacity, balance, refill timestamp in one hash, refilled and spent atomically;
   no negative balances; idle buckets expire; burst = capacity, sustained = capacity/refillInterval
   (100 capacity + 10s refill sustains 10/sec, not 100/min); request cost supported.
-- **Leaky Bucket** — POLICING only, labeled as such everywhere: depth counter with TTL set to the
-  drain horizon (`queueCapacity/drainRate`); overflow is rejected, never queued; no request waits.
+- **Leaky Bucket** — POLICING only, labeled as such everywhere: fractional water level drains
+  continuously at `drainRate`, stored with the last Redis timestamp; TTL follows the current drain
+  horizon; overflow is rejected, never queued; no request waits. Legacy integer counters migrate
+  conservatively without discarding occupied capacity.
 - **Concurrency Limit** — Redis set of unique lease ids per scope; atomic acquire; owner-checked
   release in `finally` (plus an async-listener path for async dispatches); crashed holders reclaimed
   by lease expiry; `leaseDuration` is the maximum request duration — a longer request may lose its

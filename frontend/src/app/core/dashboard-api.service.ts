@@ -16,7 +16,6 @@ export interface OverviewSnapshot {
   countersReason: Sourced<unknown>['reason'];
   /** Human notes for outcomes the meter has never recorded, so "0" is not read as "no traffic". */
   neverRecorded: string[];
-  policies: Sourced<PolicyResponse>;
   fetchedAt: Date;
 }
 
@@ -27,6 +26,9 @@ function notRecorded(): Sourced<MetricResponse> {
 
 /**
  * Aggregates the three counter reads.
+ *
+ * <p>Policy rows are deliberately absent: they come from the authenticated managed-policies API via
+ * {@code AdminStore}, so this never reads the unauthenticated YAML view as if it were live.
  *
  * The unfiltered metric response already lists which `outcome` values exist, so tag-filtered
  * follow-ups are only issued for values that are actually present. Requesting an unseen value
@@ -40,9 +42,8 @@ export class DashboardApiService {
     return forkJoin({
       health: this.api.health(),
       base: this.api.counter(),
-      policies: this.api.policies(),
     }).pipe(
-      switchMap(({ health, base, policies }) => {
+      switchMap(({ health, base }) => {
         const outcomes = base.available
           ? (base.value.availableTags?.find((t) => t.tag === 'outcome')?.values ?? [])
           : [];
@@ -74,7 +75,6 @@ export class DashboardApiService {
               countersAvailable: base.available,
               countersReason: base.reason,
               neverRecorded,
-              policies,
               fetchedAt: new Date(),
             };
           }),

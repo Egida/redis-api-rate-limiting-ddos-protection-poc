@@ -9,7 +9,14 @@
     <button type="button" class="btn-primary" (click)="onCreate()">Create policy</button>
   </div>
 
-  @if (store.capabilities(); as caps) {
+  @if (store.capabilitiesState().error; as capabilitiesError) {
+    <p class="alert alert-bad" role="alert">
+      Algorithm and scope options unavailable: {{ capabilitiesError }}
+    </p>
+    <button type="button" class="btn-secondary" (click)="store.loadCapabilities()">Retry capabilities</button>
+  } @else if (!store.capabilitiesState().loaded) {
+    <p class="loading" role="status">Loading capabilities&#8230;</p>
+  } @else if (store.capabilities(); as caps) {
     <p class="note">
       <strong>Composition:</strong> {{ caps.composition }} <strong>Topology:</strong> {{ caps.topology }}
       A request must pass every policy that matches it, and a denial charges nothing.
@@ -48,10 +55,13 @@
     </p>
   </div>
 
-  @if (store.loadError(); as error) {
-    <p class="alert alert-bad" role="alert">{{ error }}</p>
-    <button type="button" class="btn-secondary" (click)="store.load()" [disabled]="store.busy()">Retry</button>
-  } @else if (!store.loaded()) {
+  @if (store.policiesState().error; as policiesError) {
+    <p class="alert alert-bad" role="alert">Policies could not be loaded: {{ policiesError }}</p>
+    <button type="button" class="btn-secondary" (click)="store.loadPolicies()" [disabled]="store.busy()">
+      Retry policies
+    </button>
+  }
+  @if (!store.policiesState().loaded) {
     <p class="loading" role="status">Loading policies&#8230;</p>
   } @else if (policies().length === 0) {
     <p class="empty">
@@ -112,7 +122,45 @@
           </tr>
         }
       </tbody>
-    </table>
+     </table>
+  }
+
+  @if (store.exemptionsState().error; as exemptionsError) {
+    <p class="alert alert-bad" role="alert">Exemptions could not be loaded: {{ exemptionsError }}</p>
+    <button type="button" class="btn-secondary" (click)="store.loadExemptions()" [disabled]="store.busy()">
+      Retry exemptions
+    </button>
+  } @else if (store.exemptions().length > 0) {
+    <div class="panel" role="region" aria-label="Rate-limit exemptions">
+      <h3>Rate-limit exemptions</h3>
+      <p class="help">These routes bypass all rate-limit policies, including GLOBAL and APPLICATION.</p>
+      <table class="table">
+        <thead>
+          <tr>
+            <th scope="col">Route</th>
+            <th scope="col">Method</th>
+            <th scope="col">State</th>
+            <th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (ex of store.exemptions(); track ex.id) {
+            <tr>
+              <td data-label="Route"><code>{{ ex.path }}</code></td>
+              <td data-label="Method">{{ ex.method }}</td>
+              <td data-label="State">
+                <span class="chip" [class.chip-on]="ex.enabled" [class.chip-off]="!ex.enabled">
+                  {{ ex.enabled ? 'On' : 'Off' }}
+                </span>
+              </td>
+              <td class="row-actions">
+                <button type="button" class="btn-danger-ghost" (click)="onDeleteExemption(ex.id)">Delete</button>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
   }
 
   @if (probePolicyId(); as probeId) {

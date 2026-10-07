@@ -146,6 +146,15 @@ export class PoliciesPageComponent {
     this.probeSummary.set(null);
   }
 
+  protected async onDeleteExemption(id: string): Promise<void> {
+    this.store.busy.set(true);
+    try {
+      await this.store.removeExemption(id);
+    } finally {
+      this.store.busy.set(false);
+    }
+  }
+
   /** Honest note about whether the probe run crossed a window edge, so totals are not misread. */
   protected probeWindowNote(): string | null {
     const summary = this.probeSummary();

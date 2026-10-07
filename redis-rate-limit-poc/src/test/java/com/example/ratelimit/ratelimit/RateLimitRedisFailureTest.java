@@ -29,6 +29,15 @@ class RateLimitRedisFailureTest {
     private static final Policy PUBLIC = new Policy("products-read", "GET", "/api/products", 100,
             Duration.ofMinutes(1), Identity.IP, null);
 
+    private static com.example.ratelimit.policy.ExemptionStore noExemptions() {
+        return new com.example.ratelimit.policy.ExemptionStore(null, new ObjectMapper()) {
+            @Override
+            public java.util.List<com.example.ratelimit.policy.ExemptionDocument> findAll() {
+                return java.util.List.of();
+            }
+        };
+    }
+
     private static RateLimitFilter filter(FailureMode global, List<Policy> policies, RateLimitStore store) {
         var properties = new RateLimitProperties();
         properties.setOnRedisError(global);
@@ -37,7 +46,7 @@ class RateLimitRedisFailureTest {
                 PolicyEnforcer.forExplicitPolicies(PolicyMatcher.fromYamlProperties(properties), store, global),
                 new RateLimitIdentityResolver(properties),
                 new RateLimitMetrics(new SimpleMeterRegistry()),
-                properties, new ObjectMapper(), Clock.systemUTC());
+                properties, new ObjectMapper(), Clock.systemUTC(), noExemptions());
     }
 
     private static RateLimitFilter filter(FailureMode global, List<Policy> policies, boolean enabled,
@@ -50,7 +59,7 @@ class RateLimitRedisFailureTest {
                 PolicyEnforcer.forExplicitPolicies(PolicyMatcher.fromYamlProperties(properties), store, global),
                 new RateLimitIdentityResolver(properties),
                 new RateLimitMetrics(new SimpleMeterRegistry()),
-                properties, new ObjectMapper(), Clock.systemUTC());
+                properties, new ObjectMapper(), Clock.systemUTC(), noExemptions());
     }
 
     private static RateLimitStore alwaysFails() {

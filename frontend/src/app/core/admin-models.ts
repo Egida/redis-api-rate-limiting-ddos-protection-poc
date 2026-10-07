@@ -47,6 +47,60 @@ export interface PolicyEdit {
   version?: number | null;
 }
 
+export interface ExemptionEdit {
+  id: string;
+  name?: string;
+  method: string;
+  path: string;
+  enabled: boolean;
+}
+
+export interface ExemptionRecord {
+  id: string;
+  name: string;
+  method: string;
+  path: string;
+  enabled: boolean;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
+/**
+ * One dropdown entry, produced per managed policy: the operator's policy plus the concrete request
+ * that exercises it. `testable=false` entries stay visible with a reason rather than being dropped.
+ */
+export interface PolicyTargetRecord {
+  /** Stable option key: the managed policy id, so one policy is one entry. */
+  id: string;
+  policyId: string;
+  enabled: boolean;
+  algorithm: string;
+  scope: string;
+  parameterSummary: string;
+  /** As configured. May be `ANY`, a wildcard, a template, or null for a pathless scope. */
+  configuredMethod: string;
+  configuredPath: string | null;
+  /** Concrete values to send. Null when the target is not testable. */
+  method: string | null;
+  concretePath: string | null;
+  sampleQuery: string | null;
+  matchedHandler: boolean;
+  testable: boolean;
+  requiresCredentials: boolean;
+  note: string;
+  reason: string;
+  /** Every policy the limiter charges for this request, including the policy this entry is for. */
+  enforcedWith: AdminPolicy[];
+  exemptions: string[];
+}
+
+export interface DemoRouteCatalogResponse {
+  targets: PolicyTargetRecord[];
+  policies: AdminPolicy[];
+}
+
 export interface CapabilityOption {
   name: string;
   implemented: boolean;

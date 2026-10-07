@@ -51,15 +51,18 @@ public class RateLimitFilter extends OncePerRequestFilter {
     private final ObjectMapper mapper;
     private final Clock clock;
     private final AntPathMatcher matcher = new AntPathMatcher();
+    private final com.example.ratelimit.policy.ExemptionStore exemptions;
 
     public RateLimitFilter(PolicyEnforcer enforcer, RateLimitIdentityResolver identities,
-            RateLimitMetrics metrics, RateLimitProperties properties, ObjectMapper mapper, Clock clock) {
+            RateLimitMetrics metrics, RateLimitProperties properties, ObjectMapper mapper, Clock clock,
+            com.example.ratelimit.policy.ExemptionStore exemptions) {
         this.enforcer = enforcer;
         this.identities = identities;
         this.metrics = metrics;
         this.properties = properties;
         this.mapper = mapper;
         this.clock = clock;
+        this.exemptions = exemptions;
     }
 
     @Override
@@ -93,6 +96,21 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
         String method = request.getMethod();
         String path = request.getRequestURI();
+
+        // Exemptions are evaluated first: a matching exemption bypasses all rate-limit policies.
+        try {
+            for (var ex : exemptions.findAll()) {
+                if (!ex.enabled()) continue;
+                if (ex.method() != null && !"ANY".equalsIgnoreCase(ex.method())
+                        && !ex.method().equalsIgnoreCase(method)) continue;
+                if (ex.path() != null && matcher.match(ex.path(), path)) {
+                    chain.doFilter(request, response);
+                    return;
+                }
+            }
+        } catch (RuntimeException e) {
+            log.warn("exemption lookup failed for {} {}: {}", method, path, e.getMessage());
+        }
 
         List<PolicyDocument> applicable = enforcer.applicablePolicies(method, path);
         if (applicable.isEmpty()) {

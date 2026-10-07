@@ -73,13 +73,22 @@ class PolicyCompositionTest {
         SecurityContextHolder.clearContext();
     }
 
+    private static ExemptionStore noExemptions() {
+        return new ExemptionStore(null, new ObjectMapper()) {
+            @Override
+            public java.util.List<ExemptionDocument> findAll() {
+                return java.util.List.of();
+            }
+        };
+    }
+
     private RateLimitFilter filter(List<PolicyDocument> policies) {
         var properties = new RateLimitProperties();
         return new RateLimitFilter(
                 PolicyEnforcer.forExplicitPolicies(policies, store, properties.getOnRedisError()),
                 new RateLimitIdentityResolver(properties),
                 new RateLimitMetrics(new SimpleMeterRegistry()),
-                properties, new ObjectMapper(), Clock.systemUTC());
+                properties, new ObjectMapper(), Clock.systemUTC(), noExemptions());
     }
 
     private static PolicyDocument doc(String id, String method, String path, Scope scope, int limit) {
@@ -130,6 +139,74 @@ class PolicyCompositionTest {
         // app-a is exhausted, but app-b has its own quota
         assertThat(call(filter, "GET", "/api/products", "203.0.113.1").getStatus()).isEqualTo(429);
         assertThat(store.counts).as("two separate counters").hasSize(2);
+    }
+
+    @Test
+    void exemptionBypassesAllPolicies() throws Exception {
+        var exemption = ExemptionDocument.builder("ex-products")
+                .name("ex-products")
+                .route("GET", "/api/products")
+                .enabled(true)
+                .version(1)
+                .timestamps(Instant.now(), Instant.now())
+                .updatedBy("test")
+                .build();
+        var properties = new RateLimitProperties();
+        var exemptions = new ExemptionStore(null, new ObjectMapper()) {
+            @Override
+            public java.util.List<ExemptionDocument> findAll() {
+                return java.util.List.of(exemption);
+            }
+        };
+        var filterWithExemption = new RateLimitFilter(
+                PolicyEnforcer.forExplicitPolicies(List.of(doc("site-wide", "GET", "/api/*", Scope.IP, 1)), store, properties.getOnRedisError()),
+                new RateLimitIdentityResolver(properties),
+                new RateLimitMetrics(new SimpleMeterRegistry()),
+                properties, new ObjectMapper(), Clock.systemUTC(),
+                exemptions);
+
+        assertThat(call(filterWithExemption, "GET", "/api/products", "203.0.113.1").getStatus()).isEqualTo(200);
+        assertThat(call(filterWithExemption, "GET", "/api/products", "203.0.113.1").getStatus()).isEqualTo(200);
+        assertThat(store.consumes).as("exempted requests do not charge quota").isZero();
+
+        assertThat(call(filterWithExemption, "GET", "/api/orders", "203.0.113.1").getStatus()).isEqualTo(200);
+        assertThat(call(filterWithExemption, "GET", "/api/orders", "203.0.113.1").getStatus()).isEqualTo(429);
+    }
+
+    @Test
+    void exemptionValidationRejectsBroadPatterns() {
+        var tooBroad = ExemptionDocument.builder("ex-bad")
+                .name("ex-bad")
+                .route("ANY", "/**")
+                .enabled(true)
+                .version(1)
+                .timestamps(Instant.now(), Instant.now())
+                .updatedBy("test")
+                .build();
+        try {
+            tooBroad.validate();
+            throw new AssertionError("expected PolicyValidationException");
+        } catch (PolicyValidationException e) {
+            assertThat(e.problems()).contains("path /** is too broad; use a specific route");
+        }
+    }
+
+    @Test
+    void exemptionValidationRejectsAdminPaths() {
+        var adminExempt = ExemptionDocument.builder("ex-admin")
+                .name("ex-admin")
+                .route("ANY", "/api/admin/policies")
+                .enabled(true)
+                .version(1)
+                .timestamps(Instant.now(), Instant.now())
+                .updatedBy("test")
+                .build();
+        try {
+            adminExempt.validate();
+            throw new AssertionError("expected PolicyValidationException");
+        } catch (PolicyValidationException e) {
+            assertThat(e.problems()).contains("exemptions cannot target admin or actuator routes");
+        }
     }
 
     @Test

@@ -3,6 +3,7 @@ package com.example.ratelimit.admin;
 import java.time.Instant;
 import java.util.List;
 
+import com.example.ratelimit.policy.ExemptionDocument;
 import com.example.ratelimit.policy.ManagedPolicyStore;
 import com.example.ratelimit.policy.ManagedPolicyStore.PolicyNotFoundException;
 import com.example.ratelimit.policy.ManagedPolicyStore.PolicyStoreException;
@@ -50,10 +51,13 @@ public class PolicyAdminController {
 
     private final ManagedPolicyStore store;
     private final PolicySeeder seeder;
+    private final com.example.ratelimit.policy.ExemptionStore exemptions;
 
-    public PolicyAdminController(ManagedPolicyStore store, PolicySeeder seeder) {
+    public PolicyAdminController(ManagedPolicyStore store, PolicySeeder seeder,
+            com.example.ratelimit.policy.ExemptionStore exemptions) {
         this.store = store;
         this.seeder = seeder;
+        this.exemptions = exemptions;
     }
 
     @GetMapping("/policies")
@@ -104,8 +108,8 @@ public class PolicyAdminController {
                                                 "Tokens per request, at least 1. Defaults to 1."))),
                         new AlgorithmCapability("LEAKY_BUCKET", true,
                                 "POLICING, not queued shaping: requests beyond queueCapacity are rejected, never "
-                                        + "queued. The counter drains over queueCapacity/drainRate seconds, which is "
-                                        + "also the retry horizon.",
+                                        + "queued. The water level drains continuously at drainRate requests per "
+                                        + "second; Retry-After reflects when enough capacity is expected.",
                                 List.of(
                                         new Parameter("drainRate", true, "Requests drained per second."),
                                         new Parameter("queueCapacity", true, "Burst depth before overflow rejects."))),
@@ -332,7 +336,44 @@ public class PolicyAdminController {
     @ExceptionHandler(PolicyStoreException.class)
     public ResponseEntity<ErrorResponse> onStoreFailure(PolicyStoreException e) {
         log.error("policy store failure: {}", e.getMessage());
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(ErrorResponse.of("store_error", "the policy store could not complete the request"));
+    }
+
+    // --- exemptions ---
+
+    @GetMapping("/exemptions")
+    public List<ExemptionResponse> listExemptions() {
+        return exemptions.findAll().stream().map(ExemptionResponse::from).toList();
+    }
+
+    @PostMapping("/exemptions")
+    public ResponseEntity<ExemptionResponse> createExemption(@RequestBody ExemptionRequest request, Authentication auth) {
+        var doc = ExemptionDocument.builder(request.id())
+                .name(request.name() != null ? request.name() : request.id())
+                .route(request.method(), request.path())
+                .enabled(true)
+                .version(1)
+                .updatedBy(actor(auth))
+                .build();
+        var saved = exemptions.save(doc, null, actor(auth));
+        return ResponseEntity.status(HttpStatus.CREATED).body(ExemptionResponse.from(saved));
+    }
+
+    @DeleteMapping("/exemptions/{id}")
+    public ResponseEntity<Void> deleteExemption(@PathVariable String id, Authentication auth) {
+        exemptions.delete(id, actor(auth));
+        return ResponseEntity.noContent().build();
+    }
+
+    public record ExemptionRequest(String id, String name, String method, String path) {
+    }
+
+    public record ExemptionResponse(String id, String name, String method, String path, boolean enabled,
+            long version, Instant createdAt, Instant updatedAt, String updatedBy) {
+        static ExemptionResponse from(com.example.ratelimit.policy.ExemptionDocument d) {
+            return new ExemptionResponse(d.id(), d.name(), d.method(), d.path(), d.enabled(), d.version(),
+                    d.createdAt(), d.updatedAt(), d.updatedBy());
+        }
     }
 }

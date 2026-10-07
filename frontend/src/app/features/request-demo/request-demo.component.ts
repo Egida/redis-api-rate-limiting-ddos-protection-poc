@@ -1,9 +1,17 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
-import { MAX_REQUEST_COUNT, clampRequestCount, DemoCatalogService, DemoRoute } from '../../core/demo-catalog';
-import { DemoSummary, PolicyResponse } from '../../core/models';
-import { ApiClientService } from '../../core/api-client.service';
+import {
+  MAX_REQUEST_COUNT,
+  clampRequestCount,
+  DemoRoute,
+  configuredRoute,
+  requestUrl,
+  targetLabel,
+} from '../../core/demo-catalog';
+import { DemoSummary } from '../../core/models';
+import { PolicyTargetRecord } from '../../core/admin-models';
+import { AdminStore } from '../../core/admin-store.service';
 import { DemoRunnerService } from './demo-runner.service';
 
 @Component({
@@ -16,62 +24,75 @@ import { DemoRunnerService } from './demo-runner.service';
 })
 export class RequestDemoComponent {
   private readonly runner = inject(DemoRunnerService);
-  private readonly apiClient = inject(ApiClientService);
-  private readonly catalog = inject(DemoCatalogService);
+  private readonly store = inject(AdminStore);
 
   readonly maxCount = MAX_REQUEST_COUNT;
 
-  readonly routes = signal<DemoRoute[]>([]);
-  readonly catalogLoaded = signal(false);
-  readonly catalogError = signal<string | null>(null);
-
-  readonly routeId = signal('products');
+  readonly targetId = signal<string | null>(null);
   readonly requestCount = signal(20);
   readonly username = signal('');
   readonly password = signal('');
   readonly progressSent = signal(0);
   readonly progressTotal = signal(0);
   readonly formError = signal<string | null>(null);
+  /** Recorded at run start: the summary must name the target that was actually called. */
+  readonly lastRunLabel = signal<string | null>(null);
 
   readonly running = this.runner.running;
   readonly summary = computed(() => this.runner.summary());
 
-  readonly route = computed(() => this.routes().find((r) => r.id === this.routeId()) ?? this.routes()[0]);
-  readonly needsAuth = computed(() => this.route()?.needsAuth ?? false);
+  /**
+   * One dropdown entry per managed policy, in the backend's order. Disabled policies stay listed and
+   * selectable so the operator can read why they are not enforced; only entries the backend marked
+   * untestable are separated out.
+   */
+  readonly targets = computed(() => this.store.demoTargets());
+  readonly testable = computed(() => this.targets().filter((t) => t.testable));
+  readonly untestable = computed(() => this.targets().filter((t) => !t.testable));
+  readonly loading = computed(() => !this.store.demoRoutesState().loaded);
+  readonly loadError = computed(() => this.store.demoRoutesState().error);
 
-  readonly publicPolicies = signal<PolicyResponse['policies']>([]);
+  readonly targetId2Label = computed(() => new Map(this.targets().map((t) => [t.id, targetLabel(t)])));
+  readonly targetId2Configured = computed(
+    () => new Map(this.targets().map((t) => [t.id, configuredRoute(t)])),
+  );
 
-  constructor() {
-    this.catalog.fetchCatalog().subscribe({
-      next: (data) => {
-        this.routes.set(data.entries);
-        this.catalogLoaded.set(true);
-        if (data.entries.length > 0) {
-          this.routeId.set(data.entries[0].id);
-        }
-      },
-      error: () => {
-        this.routes.set([...this.catalog.fallbackRoutes]);
-        this.catalogLoaded.set(true);
-        this.catalogError.set('Backend catalog unavailable — showing fallback routes. Live limits may not match.');
-        if (this.catalog.fallbackRoutes.length > 0) {
-          this.routeId.set(this.catalog.fallbackRoutes[0].id);
-        }
-      },
-    });
-    this.apiClient.policies().subscribe((sourced) => {
-      if (sourced.available && sourced.value) {
-        this.publicPolicies.set(sourced.value.policies);
-      }
-    });
+  /** Keep every policy selectable for inspection, including disabled or non-testable entries. */
+  readonly target = computed<PolicyTargetRecord | null>(() => {
+    const options = this.targets();
+    return options.find((t) => t.id === this.targetId())
+      ?? this.testable()[0]
+      ?? options[0]
+      ?? null;
+  });
+
+  /** Every policy the limiter charges for the selected request, including the selected one. */
+  readonly enforcedWith = computed(() => this.target()?.enforcedWith ?? []);
+  readonly exemptions = computed(() => this.target()?.exemptions ?? []);
+  readonly needsAuth = computed(() => this.target()?.requiresCredentials ?? false);
+
+  readonly route = computed<DemoRoute | null>(() => {
+    const target = this.target();
+    if (!target?.testable || !target.method || !target.concretePath) return null;
+    return {
+      id: target.id,
+      label: targetLabel(target),
+      method: target.method,
+      path: requestUrl(target),
+      needsAuth: target.requiresCredentials,
+      note: target.note,
+    };
+  });
+
+  refresh(): void {
+    void this.store.loadDemoTargets();
   }
 
-  readonly liveLimit = computed(() => {
-    const r = this.route();
-    if (!r) return null;
-    const policy = this.publicPolicies().find((p) => p.method === r.method && p.path === r.path);
-    return policy?.limit ?? null;
-  });
+  constructor() {
+    // This component owns catalog loading. Fetch once on every Overview entry so the options
+    // reflect current managed policies; the parent must not race it with a duplicate request.
+    void this.store.loadDemoTargets();
+  }
 
   readonly progressPercent = computed(() => {
     const total = this.progressTotal();
@@ -88,20 +109,26 @@ export class RequestDemoComponent {
     this.requestCount.set(clampRequestCount(value));
   }
 
+  onTargetChange(event: Event): void {
+    this.targetId.set((event.target as HTMLSelectElement).value || null);
+    this.formError.set(null);
+  }
+
   onStart(): Promise<DemoSummary | null> {
     this.formError.set(null);
     if (this.running()) return Promise.resolve(null);
 
+    const target = this.target();
     const route = this.route();
-    if (!route) {
-      this.formError.set('No route selected.');
+    if (!target || !route) {
+      this.formError.set(target?.reason || 'Select a policy that can be tested automatically.');
       return Promise.resolve(null);
     }
     let credentials: { username: string; password: string } | null = null;
     if (route.needsAuth) {
       if (!this.username().trim() || !this.password()) {
         this.formError.set(
-          'This route requires HTTP Basic credentials. Without them the API answers 401 and the ' +
+          'This target needs HTTP Basic credentials. Without them the API answers 401 and the ' +
             'run would stop on the first request.',
         );
         return Promise.resolve(null);
@@ -112,10 +139,11 @@ export class RequestDemoComponent {
     const total = clampRequestCount(this.requestCount());
     this.progressTotal.set(total);
     this.progressSent.set(0);
+    this.lastRunLabel.set(`${targetLabel(target)} (${target.method} ${requestUrl(target)})`);
 
-    return this.runner.run(route, total, credentials, (sent, target) => {
+    return this.runner.run(route, total, credentials, (sent, budget) => {
       this.progressSent.set(sent);
-      this.progressTotal.set(target);
+      this.progressTotal.set(budget);
     }).then((summary) => {
       this.password.set('');
       return summary;

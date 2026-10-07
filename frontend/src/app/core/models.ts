@@ -62,6 +62,11 @@ export interface DemoSummary {
   totalSent: number;
   success: number;
   rejected: number;
+  /**
+   * 404s from downstream routing. A configured policy may name a path no handler serves; the filter
+   * runs before routing, so these requests were still charged. Counted apart from rejections.
+   */
+  notFound: number;
   error: number;
   statuses: Record<number, number>;
   first429Index: number | null;

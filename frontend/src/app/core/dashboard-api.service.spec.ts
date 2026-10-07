@@ -81,14 +81,6 @@ describe('DashboardApiService', () => {
     const promise = firstValue(api.load());
     http.expectOne('/actuator/health').flush({ status: 'UP' });
     http.expectOne(METRIC_URL).flush(metric(['allowed', 'rejected']));
-    http.expectOne('/api/poc/policies').flush({
-      source: 'rate-limit.policies (application.yml)',
-      editable: false,
-      limiterEnabled: true,
-      defaultRedisFailureMode: 'FAIL_OPEN',
-      policyCount: 1,
-      policies: [],
-    });
     http.expectOne(`${METRIC_URL}?tag=outcome%3Aallowed`).flush(metric(['allowed']));
     http.expectOne(`${METRIC_URL}?tag=outcome%3Arejected`).flush(metric(['rejected']));
     // No outcome=error request, because the meter has never recorded one.
@@ -106,9 +98,6 @@ describe('DashboardApiService', () => {
     const promise = firstValue(api.load());
     http.expectOne('/actuator/health').flush({ status: 'UP' });
     http.expectOne(METRIC_URL).flush('', { status: 404, statusText: 'Not Found' });
-    http.expectOne('/api/poc/policies').flush(
-      { source: 'x', editable: false, limiterEnabled: true, defaultRedisFailureMode: 'FAIL_OPEN', policyCount: 0, policies: [] },
-    );
 
     const snapshot = await promise;
     expect(snapshot.countersAvailable).toBe(false);
@@ -116,16 +105,16 @@ describe('DashboardApiService', () => {
     expect(snapshot.total).toBe(0);
   });
 
-  it('falls back to sample policies when the policy endpoint fails', async () => {
+  it('never reads the unauthenticated YAML policy view', async () => {
     const promise = firstValue(api.load());
     http.expectOne('/actuator/health').flush({ status: 'UP' });
     http.expectOne(METRIC_URL).flush(metric(['allowed']));
-    http.expectOne('/api/poc/policies').flush('', { status: 500, statusText: 'Server Error' });
     http.expectOne(`${METRIC_URL}?tag=outcome%3Aallowed`).flush(metric(['allowed']));
+    // Policy rows come from the authenticated managed-policies API via AdminStore instead.
+    http.expectNone('/api/poc/policies');
 
     const snapshot = await promise;
-    expect(snapshot.policies.available).toBe(false);
-    expect(snapshot.policies.reason).toBe('http-error');
+    expect(snapshot.allowed).toBe(10);
   });
 });
 
