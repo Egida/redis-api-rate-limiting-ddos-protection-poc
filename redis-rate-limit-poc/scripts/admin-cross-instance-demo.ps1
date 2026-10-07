@@ -109,7 +109,10 @@ try {
   # Fresh window + clean counters so the phases below measure exactly what they send.
   $wait = (61 - (Get-Date).Second) % 60
   if ($wait -gt 0 -and $wait -lt 60) { Write-Output ("  waiting {0}s for a fresh window" -f $wait); Start-Sleep -Seconds $wait }
-  docker exec $redisName redis-cli --scan --pattern "rate-limit:v1:*" | ForEach-Object { docker exec $redisName redis-cli del $_ | Out-Null }
+  # Clear only counters for the policy we are about to edit, not all policies.
+  $targetCounters = docker exec $redisName redis-cli --scan --pattern "rate-limit:v1:*products-read*"
+  foreach ($k in $targetCounters) { docker exec $redisName redis-cli del $k | Out-Null }
+  if ($targetCounters) { Write-Output ("  cleared {0} stale counter(s) for products-read" -f $targetCounters.Count) }
 
   Write-Output "=== [5/7] admin edit on A, enforcement observed on B (no restarts) ==="
   $edit = '{"id":"products-read","method":"GET","path":"/api/products","algorithm":"FIXED_WINDOW","scope":"IP","window":"PT1M","limit":' + $NewLimit + ',"enabled":true,"version":' + $origVersion + '}'
@@ -155,6 +158,27 @@ try {
   $restore = '{"id":"products-read","method":"GET","path":"/api/products","algorithm":"FIXED_WINDOW","scope":"IP","window":"PT1M","limit":' + $origLimit + ',"enabled":true,"version":' + $saved.version + '}'
   $restored = Invoke-RestMethod "http://localhost:$portA/api/admin/rate-limit/policies/products-read" -Method Put -Headers $H -Body $restore
   Assert ($restored.limit -eq $origLimit) ("restored limit=$($restored.limit) v$($restored.version)")
+
+  Write-Output "=== [8/7] non-fixed algorithm: sliding-window edit on A, enforced on B ==="
+  $login = Invoke-RestMethod "http://localhost:$portA/api/admin/rate-limit/policies/login-attempt" -Headers @{ Authorization = $adminAuth }
+  $slide = '{"id":"login-attempt","method":"POST","path":"/api/login","algorithm":"SLIDING_WINDOW","scope":"IP","window":"PT1M","limit":3,"enabled":true,"version":' + $login.version + '}'
+  $slid = Invoke-RestMethod "http://localhost:$portA/api/admin/rate-limit/policies/login-attempt" -Method Put -Headers $H -Body $slide
+  Assert ($slid.algorithm -eq "SLIDING_WINDOW") "A accepted the algorithm change"
+  # Clear only sliding-window counters for login-attempt, not all SW counters.
+  $loginSwCounters = docker exec $redisName redis-cli --scan --pattern "rate-limit:v1:sw:*login-attempt*"
+  foreach ($k in $loginSwCounters) { docker exec $redisName redis-cli del $k | Out-Null }
+  if ($loginSwCounters) { Write-Output ("  cleared {0} stale sliding-window counter(s) for login-attempt" -f $loginSwCounters.Count) }
+  $statuses = @()
+  for ($i = 1; $i -le 5; $i++) {
+    try { Invoke-WebRequest "http://localhost:$portB/api/login" -Method POST -UseBasicParsing -ErrorAction Stop | Out-Null; $statuses += 200 }
+    catch { $statuses += [int]$_.Exception.Response.StatusCode }
+  }
+  Assert ((($statuses | Where-Object { $_ -eq 200 }).Count) -eq 3) "B allowed exactly 3 under sliding window"
+  Assert ((($statuses | Where-Object { $_ -eq 429 }).Count) -eq 2) "B rejected 2 under sliding window"
+  Assert (([array]::IndexOf($statuses, 429) + 1) -eq 4) "first sliding 429 at request #4"
+  $back = '{"id":"login-attempt","method":"POST","path":"/api/login","algorithm":"FIXED_WINDOW","scope":"IP","window":"PT1M","limit":' + $login.limit + ',"enabled":true,"version":' + $slid.version + '}'
+  $backTo = Invoke-RestMethod "http://localhost:$portA/api/admin/rate-limit/policies/login-attempt" -Method Put -Headers $H -Body $back
+  Assert ($backTo.algorithm -eq "FIXED_WINDOW" -and $backTo.limit -eq $login.limit) "login-attempt restored"
 } finally {
   foreach ($pidToStop in $pids) { Stop-Process -Id $pidToStop -Force -ErrorAction SilentlyContinue }
   Write-Output "instances stopped (redis left running)"

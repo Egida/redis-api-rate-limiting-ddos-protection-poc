@@ -368,7 +368,7 @@ mvn clean verify         # tests + jar
 docker compose up -d     # local Redis on 6379
 java -jar target/redis-rate-limit-poc-0.1.0-SNAPSHOT.jar
 
-cd ../frontend && npm install && npm test   # 25 Angular unit tests
+  cd ../frontend && npm install && npm test   # 34 Angular unit tests
 npm start                                   # console on http://localhost:4200
 ```
 
@@ -686,7 +686,7 @@ redis-rate-limit-poc/
   src/test/resources/rate-limit-test-windows.properties
 ```
 
-## 16. Enforced algorithms, namespaces, and key management
+## 16. Enforced algorithms and namespaces
 
 Every policy selects one algorithm, enforced by a single Lua batch (`BATCH` in
 `RedisRateLimitStore.java`) that inspects all applicable counters before charging any of them.
@@ -695,20 +695,19 @@ per policy, decoded with `cjson`.
 
 | Algorithm | State | Decision | Retry |
 |---|---|---|---|
-| Fixed window | Counter, original `rate-limit:v1:*` layout | `count >= limit` denies | live TTL |
-| Exact sliding window | Sorted set `rl:v2:sw:*`, expired members trimmed per decision, TTL refreshed | events in trailing window `>= limit` denies | oldest event expiry |
-| Sliding-window counter | Current + previous counters `rl:v2:sc:*:w{index}` | `current + previous × (1 − elapsed/window) >= limit` denies; approximate | window end |
-| Token bucket | Hash `{tok, ts}` at `rl:v2:tb:*`, refilled on read, expired when idle | balance `< cost` denies | time to afford cost |
-| Leaky bucket (policing) | Depth counter `rl:v2:lb:*`, TTL = drain horizon | depth `>= queueCapacity` denies | drain horizon TTL |
-| Concurrency limit | Set of lease ids `rl:v2:cc:*`, TTL = lease | held `>= maxConcurrent` denies | lease TTL |
+| Fixed window | Counter, `rate-limit:v1:<policy>:<type>:<hash>:<window>` | `count >= limit` denies | live TTL |
+| Exact sliding window | Sorted set `rate-limit:v1:sw:<policy>:<type>:<hash>` | events in trailing window `>= limit` denies | oldest event expiry |
+| Sliding-window counter | Current + previous counters `rate-limit:v1:sc:<policy>:<type>:<hash>:w{index}` | `current + previous × (1 − elapsed/window) >= limit` denies; approximate | window end |
+| Token bucket | Hash `{tok, ts}` at `rate-limit:v1:tb:<policy>:<type>:<hash>` | balance `< cost` denies | time to afford cost |
+| Leaky bucket (policing) | Depth counter `rate-limit:v1:lb:<policy>:<type>:<hash>` | depth `>= queueCapacity` denies | drain horizon TTL |
+| Concurrency limit | Set of lease ids `rate-limit:v1:cc:<policy>:<type>:<hash>` | held `>= maxConcurrent` denies | lease TTL |
 
-Namespaces: `rate-limit:v1:*` (fixed counters), `rl:v2:{sw,sc,tb,lb,cc}:*` (algorithm state),
-`ratelimit:policy:v1:*` (policy documents, audit, seed marker), `ratelimit:apikey:v1:*` (key
-digests). No raw identity, key, or secret appears in any key, log, metric label, or screenshot.
+Namespaces: `rate-limit:v1:{sw,sc,tb,lb,cc}:*` (algorithm state),
+`ratelimit:policy:v1:*` (policy documents, audit, seed marker). No raw identity, key, or secret
+appears in any key, log, metric label, or screenshot.
 
-API keys (`ApiKeyRegistry`): `rg_`-prefixed random secrets, SHA-256 stored, raw shown once at
-creation. `API_KEY` policies resolve `X-API-Key` to owner/tier; unknown or revoked keys get 401,
-never 429. Tier is administrative metadata; per-tier rates are separate policies.
+API-key policies and credentials are no longer supported. Existing API_KEY-scoped policies in Redis
+are ignored by the enforcement path.
 
 Concurrency leases are acquired in the batch and released in `finally` after the request completes
 (an async listener covers async dispatches). Saturation is 429 with the blocking policy id,

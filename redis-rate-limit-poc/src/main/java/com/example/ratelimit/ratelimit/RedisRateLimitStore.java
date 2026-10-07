@@ -270,7 +270,7 @@ public class RedisRateLimitStore implements RateLimitStore {
 
         try {
             @SuppressWarnings("unchecked")
-            List<Long> result = redis.execute(BATCH, keys, args.toArray(new String[0]));
+            List<Long> result = redis.execute(BATCH, keys, (Object[]) args.toArray(new String[0]));
             // Denial layout {0, index, retrySecs, limit} has 4 elements; success {1, govLimit,
             // govRemaining} has 3. Both carry everything the decision needs.
             if (result == null || result.size() < 3 || result.get(0) == null) {
@@ -310,9 +310,9 @@ public class RedisRateLimitStore implements RateLimitStore {
     }
 
     /**
-     * State key per algorithm. Fixed-window counters keep the original layout so existing counters,
-     * tests and dashboards keep working; every newer algorithm lives under a {@code rl:v2} namespace
-     * that names the algorithm, keeping counters, buckets, queues and leases visibly separate.
+     * State key per algorithm. All algorithms live under the {@code rate-limit:v1} namespace with
+     * an algorithm-specific segment ({@code sw}, {@code sc}, {@code tb}, {@code lb}, {@code cc})
+     * so counters, buckets, queues and leases are visibly separate while sharing the same prefix.
      */
     String stateKey(com.example.ratelimit.policy.PolicyDocument policy, String identityType,
             String identity, long nowMillis) {

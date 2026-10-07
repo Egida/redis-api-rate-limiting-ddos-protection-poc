@@ -64,8 +64,8 @@ bookkeeping.** Two separate JVMs, one Redis, one counter.
 │   │       ├── PocMetadataController.java          GET /api/poc/policies for the console
 │   │       └── SecurityConfig.java                 in-memory users, HTTP Basic, /api/orders guarded
 │   ├── src/main/resources/application.yml          all rate-limit configuration
-│   ├── src/test/java/…                             10 test classes, 86 tests
-│   ├── scripts/  verify-all.ps1 · load-demo.ps1 · two-instance-demo.ps1 · admin-cross-instance-demo.ps1 · lib/timing.ps1
+│   ├── src/test/java/…                             11 test classes, 105 tests
+│   ├── scripts/  verify-all.ps1 · load-demo.ps1 · two-instance-demo.ps1 · admin-cross-instance-demo.ps1 · concurrency-demo.ps1 · lib/timing.ps1
 │   ├── docs/api-rate-limiting-poc.md               553-line design document
 │   └── README.md                                   backend-specific commands
 │
@@ -294,10 +294,12 @@ access method=GET path=/api/products status=200 outcome=ALLOWED durationMs=5 cli
 all six algorithms with `implemented: true` and per-algorithm parameter schemas, all five scopes
 implemented, the AND composition rule, and the `single-redis` topology note. The Angular **Admin →
 Rate Limit Policies** section (`features/admin/`, `core/admin-api.service.ts`) binds its
-algorithm/scope dropdowns and per-algorithm field groups to this response. The section covers login
+algorithm/scope dropdowns and per-algorithm field groups to this response. The section stays
+collapsed until the header's Admin button expands it; login expands it automatically and logout
+collapses it again. The section covers login
 (Basic, memory-only credentials, never stored), list, create/edit with server-version conflict
-messaging, enable/disable, two-click delete, audit history, API-key issue/revoke (raw secret shown
-once), and a bounded probe (max 30 sequential requests, cancellable) that reuses the demo runner.
+messaging, enable/disable, two-click delete, audit history, and a bounded probe (max 30 sequential
+requests, cancellable) that reuses the demo runner.
 `GET /api/poc/policies` stays read-only for the dashboard.
 
 ### Enforced algorithms (all in one atomic Lua batch, Redis server time)
@@ -318,20 +320,40 @@ once), and a bounded probe (max 30 sequential requests, cancellable) that reuses
   by lease expiry; `leaseDuration` is the maximum request duration — a longer request may lose its
   permit. Saturation is 429, consistent with every other denial.
 
-### API keys
+### Release semantics
 
-`POST/GET/DELETE /api/admin/rate-limit/keys` (ROLE_ADMIN). Raw secret returned once at creation;
-only the SHA-256 digest is stored (`ratelimit:apikey:v1:*`, no TTL — durable until revoked).
-`API_KEY` policies resolve `X-API-Key` server-side to owner/tier; missing/unknown/revoked keys get
-401, never 429. Tier is administrative metadata; per-tier rate differences are separate policies.
+Concurrency permits release in `finally` after the request completes, so success, error, and timeout
+paths all free the permit (verified: a failing `/api/work` call followed by a normal one). Async
+dispatches release via an async listener instead. Crashed holders are reclaimed by lease expiry;
+`leaseDuration` is the maximum request duration, and overrunning it may lose the permit.
+
+### Read-only console metadata
+
+`GET /api/poc/policies` serves the managed policies from shared Redis (same shape as before, plus
+`algorithm`, `scope`, `parameterSummary`, `enabled`, `version`; `source` names the store and
+`editable` is true). Nulls stay null — a bucket has no window — and the table renders them as
+blanks. When the store is empty or unreachable it falls back to the `application.yml` baseline,
+like the enforcement path does. Durations render humanized (`10 per 1 minute`, never `PT1M`).
+Verified live against an isolated JVM: `source=managed policy store (Redis)`, 4 policies, live
+limit 50 on `order-create`.
+
+### Proven sharing
+
+- GLOBAL fixed policy: two different client IPs on different routes share one quota (filter-level
+  proof; the key is IP-independent by construction).
+- USER policy on a wide pattern: one authenticated user shares one quota across endpoints, while a
+  second user gets a separate quota.
+- Non-fixed algorithm across instances: `login-attempt` switched to SLIDING_WINDOW on JVM A was
+  enforced by JVM B (3×200 then 2×429) with no restart, then restored.
 
 ---
 
-## 6. Tests — 99 JVM tests across 10 classes
+## 6. Tests — 105 JVM tests across 11 classes
 
 | File | @Test | What it establishes |
 |---|---|---|
-| `PolicyAdminControllerTest` | 14 | Admin boundary: anonymous 401, demo USER 403, admin CRUD lifecycle, stale version 409, invalid policy 400, implemented algorithms save, audit without secrets, capabilities content + auth, API-key issue/use/revoke lifecycle, key endpoints admin-only |
+| `PolicyAdminControllerTest` | 17 | Admin boundary: anonymous 401, demo USER 403, admin CRUD lifecycle, stale version 409, invalid policy 400, implemented algorithms save, audit without secrets, capabilities content + auth, concurrency permit released on error |
+| `PolicyCompositionTest` | 3 | GLOBAL quota shared across clients/routes, USER quota shared across endpoints, per-user isolation |
 | `ManagedPolicyStoreTest` | 12 | Redis round trip, policy/counter namespacing, create refusal, stale-version conflict, version advance, concurrent-save winner, delete, audit, seed/reset, validation |
 | `RateLimitIdentityResolverTest` | 25 | IPv4 spelling canonicalisation, XFF right-to-left walk, forged leftmost prefix, multi-hop, all-trusted, untrusted peer, IPv6 |
 | `RateLimitHttpIntegrationTest` | 7 | Below-limit passes, beyond-limit 429 with retry info, per-user isolation, authenticated route limits by user not IP, 401 is not rate-limited, excluded routes pass, bounded metric labels |
@@ -361,7 +383,7 @@ of 4, asserts exactly 4 allowed. A real shared-state test, not a mock.
 `app.spec.ts`, `dashboard-api.service.spec.ts`, `demo-catalog.spec.ts`,
 `demo-runner.service.spec.ts`, `admin-api.service.spec.ts` (login/auth mapping, 409/400 mapping,
 logout drops credentials), `admin-policies.component.spec.ts` (login gating, capabilities-bound
-dropdown, unimplemented algorithm refused locally). Runner is `@angular/build:unit-test` on Vitest 5
+dropdown, non-enforced algorithm refused per capabilities flags). Runner is `@angular/build:unit-test` on Vitest 5
 (jsdom). `npm run build`: Initial 267.66 kB, transfer 71.22 kB. Note
 `app.spec.ts` asserts credentials, Redis keys and authorization headers are never rendered.
 
@@ -373,7 +395,7 @@ Measured in this environment, not quoted from anywhere.
 
 | Command | Result |
 |---|---|
-| `mvn -B -o clean test` | Tests run 99, Failures 0, Errors 0 — BUILD SUCCESS |
+| `mvn -B -o clean test` | Tests run 105, Failures 0, Errors 0 — BUILD SUCCESS |
 | `npm test` | 5 suites, 25/25 passed, 4.46 s |
 | `npm run build` | Initial 244.44 kB, Transfer 66.15 kB, bundle 4.847 s |
 | `verify-all.ps1 -SkipBuild -SkipUnitTests` | 133.50 s, every step OK |
@@ -381,7 +403,7 @@ Measured in this environment, not quoted from anywhere.
 | `load-demo.ps1` orders, 45 req, limit 30 | 30×200, 15×429, first 429 at **#31** — PASS |
 | `load-demo.ps1 -SelfTest` | 8 window-arithmetic checks passed, exit 0 |
 | `two-instance-demo.ps1` | 89.3 s — 2 JVMs on 18081/18082 (pids 18120/7364), 30×200 + 30×429 each, **one** Redis key, count 60, pttl 17760 |
-| `admin-cross-instance-demo.ps1` | 14/14 checks passed, 2 real JVMs (:18081/:18082), one Redis. Edit on A (products-read 100→5, v5→v6); B allowed exactly 5 then 5×429, first 429 at #6, counter == 5. alice 403, stale edit 409, namespaces disjoint, limit restored to 100 (v7). |
+| `admin-cross-instance-demo.ps1` | 19/19 checks passed, 2 real JVMs (:18081/:18082), one Redis. Edit on A (products-read 100→5); B allowed exactly 5 then 5×429, first 429 at #6, counter == 5. alice 403, stale edit 409, namespaces disjoint, limit restored. Then `login-attempt` switched to SLIDING_WINDOW on A: B allowed exactly 3 then 2×429, first 429 at #4; policy restored to fixed/10. |
 | browser demo, 150 requests | 100 allowed / 50 rejected, first 429 at **#101**, 1.9 s, `Retry-After: 59 s` |
 
 Toolchain: Java 21.0.12.1, Maven 3.9.16, Node 24.19.0, npm 11.17.0, Docker 29.8.0.
@@ -457,7 +479,7 @@ Verified against the live DOM: title `RateGuard - API Protection Console`, Redis
 | `43272c5` | Initial commit — 83 files |
 | `b890e73` | Markdown report + README doc-map link |
 | see `git log` | Angular 22 version correction across README, Markdown report, HTML report, regenerated PDF |
-| **uncommitted** | Two-JVM admin proof (`admin-cross-instance-demo.ps1`, 14/14), capabilities endpoint, Angular admin section, counter-semantics correction (denials charge nothing) |
+| **uncommitted** | Release-on-error proof, GLOBAL/USER-wide sharing proofs, sliding-window cross-instance phase, corrected README counts |
 
 ### The Angular version error, and the fix
 
@@ -508,8 +530,9 @@ State these before a reviewer finds them.
     balances use floating point; a concurrency permit may be reclaimed after `leaseDuration` even if
     its request is still running.
 12. **Leaky bucket is policing, not shaping.** Overflow rejects; nothing queues, no request waits.
-13. **Key tiers are metadata.** The registry resolves owner and tier, but per-tier rate differences
-    need separate policies.
+13. **Key tiers select policies; they are not rate dimensions themselves.** A tier-named policy
+    binds only that tier's keys. There is no "limit per tier value" primitive beyond writing one
+    policy per tier.
 14. **Single Redis, no Cluster.** Multi-key batch scripts span slots without hash tags; Cluster would
     need shared-slot keys and is untested.
 
@@ -637,7 +660,7 @@ The brief this POC answers has 11 scope items and 16 acceptance criteria. All ar
 | 12 | Documented key convention | `RedisRateLimitStore:95`, design doc §4 |
 | 13 | Allowed/rejected statistics | `ratelimit.requests` counter, tagged by outcome |
 | 14 | Redis failure handled | per-policy fail-open/closed, 503 on fail-closed |
-| 15 | Six required test classes | 99 tests across 10 classes — see §6 |
+| 15 | Six required test classes | 105 tests across 11 classes — see §6 |
 | 16 | Eight documentation topics | design doc 15 sections + README + 3 report formats |
 
 **Sample limits match the brief exactly:** `GET /api/products` 100/min/IP,
@@ -675,3 +698,72 @@ Then open <http://localhost:4200>, set Requests to 150, press Start demo. Expect
 
 Read in this order: `README.md` → design doc §3 (algorithm) and §5 (identity) → `RateLimitFilter`
 → `RedisRateLimitStore`.
+
+---
+
+## 2026-10-06 — routed admin console, login diagnostics, browser QA
+
+### State
+
+Uncommitted on `main` @ `233b4d9` (55 dirty entries). Nothing committed, nothing reset.
+
+### Fixed this session
+
+1. **`HTTP undefined` (the real bug).** `AdminApiService.request()` piped
+   `catchError((error: HttpErrorResponse) => …)`, but `timeout(8000)` raises an RxJS **`TimeoutError`**,
+   which is not an `HttpErrorResponse`. `error.status` was therefore `undefined` and the message
+   template produced the literal string `HTTP undefined`. Added `export const TIMEOUT_STATUS = -1`,
+   an explicit `error instanceof TimeoutError` branch (`code: 'timeout'`), widened `toError()` to take
+   `unknown`, and guarded the non-`HttpErrorResponse` case. `describeLoginFailure` is now exported from
+   `admin-login.component.ts` with distinct 401 / 403 / timeout / unreachable branches.
+
+   Root cause is the type lie, **not** the network. Proven: against an isolated JVM behind a throwaway
+   proxy config, `HttpClient` login completed in **269 ms** — the 8 s timeout never fired. The 8 s value
+   is left unchanged rather than raised to hide the symptom.
+
+2. **Overview pointed at a section that no longer exists.** The footnote said policies "can be edited in
+   the Admin section below" — true pre-routing, wrong after. Now "Read-only snapshot. Policies live in
+   shared Redis and are edited in the [Policies workspace](/policies)"; `RouterLink` added to
+   `DashboardPageComponent` imports.
+
+3. **Blank Algorithm column against the stale `:8080` jar.** `PolicySummary.algorithm/scope/
+   parameterSummary` were typed as required, but the live jar predates the metadata rewiring and omits
+   them. They are now optional/nullable, `withDerivedFields()` maps absent values to `—`, and the
+   template renders `{{ policy.algorithm ?? '—' }}`.
+
+4. **Doubled periods on Policies.** The capabilities descriptions already end in `.`, and the template
+   appended a second one (`…charges nothing anywhere..`, `…Redis Cluster is unsupported..`).
+   Removed the redundant punctuation in `policies-page.component.html:14`.
+
+### Not bugs — do not "fix" these
+
+- **A 401 from live `:8080` is correct.** That JVM was launched as a plain `java -jar … --server.port=8080`
+  with no `RATELIMIT_ADMIN_USER` / `RATELIMIT_ADMIN_PASSWORD` in its environment. `application.yml`
+  defaults both to empty, which rejects every caller. Every credential variant returns 401 in 6–227 ms.
+  To use the admin console against a backend, start that JVM with both env vars set.
+- **`404 /actuator/metrics/ratelimit.requests`** — the backend registers no such meter, and
+  `ApiClientService.counter()` already maps 404 to `{available:false, reason:'no-data'}`, rendering
+  "No counter data yet". Expected console noise.
+- **Bundle 277 → 402 kB** is `@angular/router`, never bundled before. Expected cost of adding routing.
+  All routes are still eager imports; there are no lazy chunks yet.
+- **A hard reload signs you out.** Credentials live only in `AdminApiService` memory and are never
+  persisted, by design. Use the nav links to move between sections.
+
+### Verification
+
+- `cd frontend; npm test` → **55 passed (9 files)**. Two new tests drive the 8 s timeout with
+  `vi.useFakeTimers()` and assert the rendered text blames the network, never the password, and never
+  contains `undefined` or the typed secret.
+- `npm run build` → success, **401.83 kB** raw / **102.28 kB** initial.
+- Browser QA on an isolated stack (throwaway Redis on 6399, backend on 18099, dev server on 14200):
+  login 269 ms; `/overview`, `/policies`, `/audit` all render live data; client-side
+  transitions < 800 ms; policy editor opens with 10 fields and rejects an empty submit with field-level
+  messages while creating nothing; no horizontal overflow at 390 px on any route; a mocked legacy
+  `/api/poc/policies` payload renders `—` with no `undefined` anywhere.
+
+### Live environment was never mutated
+
+Only processes started for this QA were touched, each verified by listening port and then confirmed
+closed: JVM on 18099, dev server on 14200, container `ratelimit-qa-redis`. Live `:8080` (pid 10132),
+`:4200` (pid 13780) and container `ratelimit-poc-redis` were left running throughout, and the temporary
+build tree plus the throwaway-credential file were deleted.

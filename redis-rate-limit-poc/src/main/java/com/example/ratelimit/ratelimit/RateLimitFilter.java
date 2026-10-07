@@ -46,7 +46,6 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
     private final PolicyEnforcer enforcer;
     private final RateLimitIdentityResolver identities;
-    private final com.example.ratelimit.policy.ApiKeyRegistry apiKeys;
     private final RateLimitMetrics metrics;
     private final RateLimitProperties properties;
     private final ObjectMapper mapper;
@@ -54,11 +53,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
     private final AntPathMatcher matcher = new AntPathMatcher();
 
     public RateLimitFilter(PolicyEnforcer enforcer, RateLimitIdentityResolver identities,
-            com.example.ratelimit.policy.ApiKeyRegistry apiKeys, RateLimitMetrics metrics,
-            RateLimitProperties properties, ObjectMapper mapper, Clock clock) {
+            RateLimitMetrics metrics, RateLimitProperties properties, ObjectMapper mapper, Clock clock) {
         this.enforcer = enforcer;
         this.identities = identities;
-        this.apiKeys = apiKeys;
         this.metrics = metrics;
         this.properties = properties;
         this.mapper = mapper;
@@ -106,37 +103,42 @@ public class RateLimitFilter extends OncePerRequestFilter {
         // Each policy uses its own scope's identity. USER falls back to IP when unauthenticated, so an
         // anonymous flood cannot bypass a user-scoped rule; GLOBAL uses one constant identity.
         var resolved = new ArrayList<PolicyEnforcer.ResolvedPolicy>(applicable.size());
-        for (PolicyDocument policy : applicable) {
-            if (policy.scope() == Scope.GLOBAL) {
-                resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, Scope.GLOBAL.name(), "global"));
-            } else if (policy.scope() == Scope.API_KEY) {
-                var key = apiKeys.resolve(request.getHeader("X-API-Key"));
-                if (key.isEmpty()) {
-                    // Not a rate decision at all: without a valid key there is no identity to charge.
-                    metrics.record(RateLimitMetrics.Outcome.ERROR, policy.id(), "apikey");
-                    writeUnauthorized(response, request, policy);
-                    return;
-                }
-                resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, Scope.API_KEY.name(),
-                        key.get().keyId()));
-            } else {
-                Identity identity = identities.resolve(request, enforcer.storePolicy(policy));
-                resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, identity.type(), identity.value()));
-            }
-        }
-
+        PolicyDocument activePolicy = applicable.get(0);
         PolicyEnforcer.Composition composition;
         try {
+            for (PolicyDocument policy : applicable) {
+                activePolicy = policy;
+                if (policy.scope() == Scope.GLOBAL) {
+                    resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, Scope.GLOBAL.name(), "global"));
+                } else if (policy.scope() == Scope.APPLICATION) {
+                    resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, Scope.APPLICATION.name(), "application"));
+                } else {
+                    Identity identity = identities.resolve(request, enforcer.storePolicy(policy));
+                    resolved.add(new PolicyEnforcer.ResolvedPolicy(policy, identity.type(), identity.value()));
+                }
+            }
+
+            if (resolved.isEmpty()) {
+                // Tier mismatch or non-applicable policies: non-applicable policies do not charge.
+                chain.doFilter(request, response);
+                return;
+            }
+
             composition = enforcer.enforceResolved(resolved, clock.millis());
         } catch (RateLimitStore.RateLimitStoreUnavailableException e) {
-            PolicyDocument governing = applicable.get(0);
+            PolicyDocument governing = activePolicy != null ? activePolicy : applicable.get(0);
             String outcomeIdentity = identityTypeFor(resolved, governing.id());
-            metrics.record(RateLimitMetrics.Outcome.ERROR, governing.id(), outcomeIdentity);
+            metrics.record(RateLimitMetrics.Outcome.STORE_ERROR, governing.id(), outcomeIdentity);
             log.warn("rate limit store unavailable for policy {}", governing.id(), e);
             if (enforcer.failureModeFor(governing) == FailureMode.FAIL_CLOSED) {
                 writeStoreUnavailable(response, request, governing);
                 return;
             }
+            chain.doFilter(request, response);
+            return;
+        }
+
+        if (composition.consulted().isEmpty()) {
             chain.doFilter(request, response);
             return;
         }
@@ -258,21 +260,6 @@ public class RateLimitFilter extends OncePerRequestFilter {
         body.put("consultedPolicies",
                 composition.consulted().stream().map(PolicyDocument::id).toList());
         mapper.writeValue(response.getOutputStream(), body);
-    }
-
-    /** No valid API key was presented, so there is no identity to rate-limit: 401, not 429. */
-    private void writeUnauthorized(HttpServletResponse response, HttpServletRequest request,
-            PolicyDocument policy) throws IOException {
-        response.setStatus(HttpStatus.UNAUTHORIZED.value());
-        response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-        response.setHeader("X-RateLimit-Policy", policy.id());
-        mapper.writeValue(response.getOutputStream(), Map.of(
-                "timestamp", Instant.now(clock).toString(),
-                "status", HttpStatus.UNAUTHORIZED.value(),
-                "error", HttpStatus.UNAUTHORIZED.getReasonPhrase(),
-                "message", "A valid X-API-Key header is required for this route.",
-                "path", request.getRequestURI(),
-                "policy", policy.id()));
     }
 
     /** No quota was counted, so no X-RateLimit-Limit/Remaining headers are emitted here. */

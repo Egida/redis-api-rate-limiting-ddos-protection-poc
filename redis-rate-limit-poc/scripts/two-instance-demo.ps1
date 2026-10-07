@@ -34,10 +34,10 @@ if ($ports.Count -lt 2) { throw "no two free ports found scanning from $scanFrom
 $wait = (61 - (Get-Date).Second) % 60
 if ($wait -gt 0) { Write-Output "waiting $wait s for a fresh window"; Start-Sleep -Seconds $wait }
 
-# Clear any counter left by a previous demo run so the totals describe this run only.
-$stale = docker exec $redisName redis-cli --scan --pattern "rate-limit:v1:*"
-foreach ($k in $stale) { docker exec $redisName redis-cli del $k | Out-Null }
-if ($stale) { Write-Output "cleared $($stale.Count) stale counter(s) from a previous run" }
+# Clear only counters for the policy this demo exercises (order-create), so other policies' counters are preserved.
+  $stale = docker exec $redisName redis-cli --scan --pattern "rate-limit:v1:*order-create*"
+  foreach ($k in $stale) { docker exec $redisName redis-cli del $k | Out-Null }
+  if ($stale) { Write-Output "cleared $($stale.Count) stale counter(s) for order-create from a previous run" }
 
 $pids = @()
 foreach ($port in $ports) {

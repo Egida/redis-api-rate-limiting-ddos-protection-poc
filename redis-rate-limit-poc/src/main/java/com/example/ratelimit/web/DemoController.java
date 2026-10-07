@@ -46,15 +46,22 @@ public class DemoController {
      *
      * <p>Per-JVM counters on purpose: the cross-instance script compares the sum of both JVMs'
      * observed maxima against the configured cap.
+     *
+     * @param fail when true, throws after tracking overlap, so tests can prove a permit is released
+     *             on the error path as well as on success
      */
     @GetMapping("/work")
-    public Map<String, Object> work(@RequestParam(defaultValue = "200") int ms)
+    public Map<String, Object> work(@RequestParam(defaultValue = "200") int ms,
+            @RequestParam(defaultValue = "false") boolean fail)
             throws InterruptedException {
         int bounded = Math.max(0, Math.min(ms, 2000));
         int current = workInFlight.incrementAndGet();
         try {
             workMaxObserved.accumulateAndGet(current, Math::max);
             Thread.sleep(bounded);
+            if (fail) {
+                throw new IllegalStateException("demo failure as requested");
+            }
         } finally {
             workInFlight.decrementAndGet();
         }

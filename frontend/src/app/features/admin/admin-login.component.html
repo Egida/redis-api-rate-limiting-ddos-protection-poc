@@ -1,0 +1,27 @@
+<section class="login-card" aria-labelledby="login-heading">
+  <div class="login-brand">
+    <span class="login-brand-mark" aria-hidden="true">RG</span>
+  </div>
+  <h2 id="login-heading">Administrator login</h2>
+  <p class="login-sub">
+    Policy administration affects live traffic. Sign in with the administrator account; credentials
+    stay in this page&#8217;s memory only and are never stored in the browser.
+  </p>
+  <form (ngSubmit)="onLogin()" aria-label="Administrator login" autocomplete="off">
+    <label>
+      Username
+      <input type="text" name="admin-user" [ngModel]="username()" (ngModelChange)="username.set($event)" autocomplete="username" required />
+    </label>
+    <label>
+      Password
+      <input type="password" name="admin-password" [ngModel]="password()" (ngModelChange)="password.set($event)" autocomplete="current-password" required />
+    </label>
+    @if (error()) {
+      <p class="error" role="alert">{{ error() }}</p>
+    }
+    <div class="actions">
+      <button type="submit" class="btn-primary" [disabled]="busy()">Log in</button>
+      <a routerLink="/overview" class="btn-ghost">Back to overview</a>
+    </div>
+  </form>
+</section>

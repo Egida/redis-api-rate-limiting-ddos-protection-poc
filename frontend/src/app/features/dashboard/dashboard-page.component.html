@@ -71,26 +71,28 @@
     <table>
       <caption class="visually-hidden">Configured rate-limit policies</caption>
       <thead>
-        <tr>
-          <th scope="col">Route</th>
-          <th scope="col">Method</th>
-          <th scope="col">Limit</th>
-          <th scope="col">Window</th>
-          <th scope="col">Identity</th>
-          <th scope="col">Redis failure mode</th>
-        </tr>
-      </thead>
+          <tr>
+            <th scope="col">Route</th>
+            <th scope="col">Method</th>
+            <th scope="col">Algorithm</th>
+            <th scope="col">Limit</th>
+            <th scope="col">Window</th>
+            <th scope="col">Identity</th>
+            <th scope="col">Redis failure mode</th>
+          </tr>
+        </thead>
       <tbody>
         @if (loading() && !snapshot()) {
-          <tr><td colspan="6" class="muted">Loading…</td></tr>
+          <tr><td colspan="7" class="muted">Loading…</td></tr>
         } @else {
           @for (policy of policies(); track policy.id) {
             <tr>
-              <td class="mono">{{ policy.path }}</td>
+              <td class="mono">{{ policy.path ?? '(all routes)' }}</td>
               <td>{{ policy.method }}</td>
-              <td>{{ policy.limit }}</td>
-              <td>{{ formatWindow(policy.windowSeconds) }}</td>
-              <td>{{ policy.identity === 'USER' ? 'Authenticated user' : 'Client IP' }}</td>
+              <td>{{ policy.algorithm ?? '—' }}</td>
+              <td>{{ policy.limit === null ? '—' : policy.limit }}</td>
+              <td>{{ policy.windowSeconds === null ? '—' : formatWindow(policy.windowSeconds) }}</td>
+              <td>{{ identityLabel(policy.identity) }}</td>
               <td>
                 <span
                   class="pill"
@@ -104,7 +106,8 @@
     </table>
   </div>
   <p class="footnote">
-    Policies are configured in <code>application.yml</code> and cannot be edited from this console.
+    Read-only snapshot. Policies live in shared Redis and are edited in the
+    <a routerLink="/policies">Policies workspace</a>.
   </p>
 </section>
 

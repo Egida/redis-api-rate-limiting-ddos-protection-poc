@@ -1,8 +1,9 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
-import { DEMO_ROUTES, MAX_REQUEST_COUNT, clampRequestCount } from '../../core/demo-catalog';
-import { DemoSummary } from '../../core/models';
+import { MAX_REQUEST_COUNT, clampRequestCount, DemoCatalogService, DemoRoute } from '../../core/demo-catalog';
+import { DemoSummary, PolicyResponse } from '../../core/models';
+import { ApiClientService } from '../../core/api-client.service';
 import { DemoRunnerService } from './demo-runner.service';
 
 @Component({
@@ -15,11 +16,16 @@ import { DemoRunnerService } from './demo-runner.service';
 })
 export class RequestDemoComponent {
   private readonly runner = inject(DemoRunnerService);
+  private readonly apiClient = inject(ApiClientService);
+  private readonly catalog = inject(DemoCatalogService);
 
-  readonly routes = DEMO_ROUTES;
   readonly maxCount = MAX_REQUEST_COUNT;
 
-  readonly routeId = signal(DEMO_ROUTES[0].id);
+  readonly routes = signal<DemoRoute[]>([]);
+  readonly catalogLoaded = signal(false);
+  readonly catalogError = signal<string | null>(null);
+
+  readonly routeId = signal('products');
   readonly requestCount = signal(20);
   readonly username = signal('');
   readonly password = signal('');
@@ -28,10 +34,45 @@ export class RequestDemoComponent {
   readonly formError = signal<string | null>(null);
 
   readonly running = this.runner.running;
-  readonly summary = this.runner.summary;
+  readonly summary = computed(() => this.runner.summary());
 
-  readonly route = computed(() => DEMO_ROUTES.find((r) => r.id === this.routeId()) ?? DEMO_ROUTES[0]);
-  readonly needsAuth = computed(() => this.route().needsAuth);
+  readonly route = computed(() => this.routes().find((r) => r.id === this.routeId()) ?? this.routes()[0]);
+  readonly needsAuth = computed(() => this.route()?.needsAuth ?? false);
+
+  readonly publicPolicies = signal<PolicyResponse['policies']>([]);
+
+  constructor() {
+    this.catalog.fetchCatalog().subscribe({
+      next: (data) => {
+        this.routes.set(data.entries);
+        this.catalogLoaded.set(true);
+        if (data.entries.length > 0) {
+          this.routeId.set(data.entries[0].id);
+        }
+      },
+      error: () => {
+        this.routes.set([...this.catalog.fallbackRoutes]);
+        this.catalogLoaded.set(true);
+        this.catalogError.set('Backend catalog unavailable — showing fallback routes. Live limits may not match.');
+        if (this.catalog.fallbackRoutes.length > 0) {
+          this.routeId.set(this.catalog.fallbackRoutes[0].id);
+        }
+      },
+    });
+    this.apiClient.policies().subscribe((sourced) => {
+      if (sourced.available && sourced.value) {
+        this.publicPolicies.set(sourced.value.policies);
+      }
+    });
+  }
+
+  readonly liveLimit = computed(() => {
+    const r = this.route();
+    if (!r) return null;
+    const policy = this.publicPolicies().find((p) => p.method === r.method && p.path === r.path);
+    return policy?.limit ?? null;
+  });
+
   readonly progressPercent = computed(() => {
     const total = this.progressTotal();
     return total === 0 ? 0 : Math.round((this.progressSent() / total) * 100);
@@ -52,6 +93,10 @@ export class RequestDemoComponent {
     if (this.running()) return Promise.resolve(null);
 
     const route = this.route();
+    if (!route) {
+      this.formError.set('No route selected.');
+      return Promise.resolve(null);
+    }
     let credentials: { username: string; password: string } | null = null;
     if (route.needsAuth) {
       if (!this.username().trim() || !this.password()) {
@@ -72,7 +117,6 @@ export class RequestDemoComponent {
       this.progressSent.set(sent);
       this.progressTotal.set(target);
     }).then((summary) => {
-      // Credentials are dropped as soon as the run ends.
       this.password.set('');
       return summary;
     });

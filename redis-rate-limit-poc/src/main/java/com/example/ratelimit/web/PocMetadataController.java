@@ -8,53 +8,169 @@ import java.util.Map;
 import com.example.ratelimit.config.RateLimitProperties;
 import com.example.ratelimit.config.RateLimitProperties.FailureMode;
 import com.example.ratelimit.config.RateLimitProperties.Policy;
+import com.example.ratelimit.policy.ManagedPolicyStore;
+import com.example.ratelimit.policy.PolicyDocument;
+import com.example.ratelimit.policy.Scope;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Read-only metadata for the RateGuard console: which policies are configured and how this
+ * Read-only metadata for the RateGuard console: which policies are currently enforced and how this
  * instance would behave if Redis were unreachable.
  *
- * <p>Everything here comes from bound {@code rate-limit.*} configuration, which is the same source
- * {@code application.yml} documents. Nothing is mutable over HTTP, and no Redis key, client
- * identity or credential is exposed.
+ * <p>Reads the administrator-managed policies from shared Redis, so the console shows live edits
+ * rather than the startup seed. When the managed store is empty or unreachable it falls back to the
+ * bound {@code rate-limit.*} configuration — the same baseline the enforcement path falls back to —
+ * and says so in {@code source}. Nothing is mutable over HTTP, and no Redis key, client identity
+ * or credential is exposed.
  */
 @RestController
 @RequestMapping("/api/poc")
 public class PocMetadataController {
 
+    private static final Logger log = LoggerFactory.getLogger(PocMetadataController.class);
+
+    private final ManagedPolicyStore store;
     private final RateLimitProperties properties;
 
-    public PocMetadataController(RateLimitProperties properties) {
+    public PocMetadataController(ManagedPolicyStore store, RateLimitProperties properties) {
+        this.store = store;
         this.properties = properties;
     }
 
     @GetMapping("/policies")
     public Map<String, Object> policies() {
+        List<PolicyDocument> managed = List.of();
+        boolean live = false;
+        try {
+            managed = store.findAll();
+            live = !managed.isEmpty();
+        } catch (RuntimeException e) {
+            log.warn("managed policy lookup failed for the console ({}); showing the configuration baseline",
+                    e.getClass().getSimpleName());
+        }
         List<Map<String, Object>> policies = new ArrayList<>();
-        for (Policy policy : properties.getPolicies()) {
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id", policy.id());
-            row.put("method", policy.method());
-            row.put("path", policy.path());
-            row.put("limit", policy.limit());
-            row.put("windowSeconds", policy.window().toSeconds());
-            row.put("identity", policy.identity().name());
-            FailureMode failureMode = policy.failureMode(properties.getOnRedisError());
-            row.put("redisFailureMode", failureMode.name());
-            row.put("redisFailureModeLabel", switch (failureMode) {
-                case FAIL_OPEN -> "Fail open";
-                case FAIL_CLOSED -> "Fail closed";
-            });
-            policies.add(row);
+        String source;
+        if (live) {
+            for (PolicyDocument policy : managed) {
+                policies.add(row(policy));
+            }
+            source = "managed policy store (Redis)";
+        } else {
+            for (Policy policy : properties.getPolicies()) {
+                policies.add(legacyRow(policy));
+            }
+            source = "rate-limit.policies (application.yml)";
         }
         return Map.of(
-                "source", "rate-limit.policies (application.yml)",
-                "editable", false,
+                "source", source,
+                "editable", true,
                 "limiterEnabled", properties.isEnabled(),
                 "defaultRedisFailureMode", properties.getOnRedisError().name(),
                 "policyCount", policies.size(),
                 "policies", policies);
+    }
+
+    /** Authoritative catalog of endpoints the request-demo can safely call. */
+    @GetMapping("/demo-catalog")
+    public Map<String, Object> demoCatalog() {
+        List<Map<String, Object>> entries = new ArrayList<>();
+        entries.add(demoEntry("products", "GET /api/products", "GET", "/api/products", false,
+                "Public read route, limited per client IP."));
+        entries.add(demoEntry("login", "POST /api/login", "POST", "/api/login", false,
+                "Credential route, fails closed while Redis is down. The controller takes an optional ?user= query parameter and no request body, so this demo sends no payload."));
+        entries.add(demoEntry("orders", "POST /api/orders", "POST", "/api/orders", true,
+                "Authenticated route, limited per authenticated user. Enter HTTP Basic credentials below; they are held in memory for this run only and are never stored or logged."));
+        entries.add(demoEntry("work", "GET /api/work", "GET", "/api/work", false,
+                "Slow stand-in for concurrency demos. Accepts ?ms= (max 2000) and ?fail=true."));
+        return Map.of("source", "backend", "editable", false, "entries", entries);
+    }
+
+    private static Map<String, Object> demoEntry(String id, String label, String method, String path,
+            boolean needsAuth, String note) {
+        Map<String, Object> e = new LinkedHashMap<>();
+        e.put("id", id);
+        e.put("label", label);
+        e.put("method", method);
+        e.put("path", path);
+        e.put("needsAuth", needsAuth);
+        e.put("note", note);
+        return e;
+    }
+
+    /** One managed policy, in the shape the console table binds to. Nulls stay null: a token bucket
+     * has no window, a concurrency policy has no request limit, and the table renders that honestly
+     * instead of inventing a number. */
+    private Map<String, Object> row(PolicyDocument policy) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", policy.id());
+        row.put("method", policy.method());
+        row.put("path", policy.path());
+        row.put("algorithm", policy.algorithm() == null ? null : policy.algorithm().name());
+        row.put("scope", policy.scope() == null ? null : policy.scope().name());
+        row.put("parameterSummary", safeSummary(policy));
+        row.put("enabled", policy.enabled());
+        row.put("version", policy.version());
+        row.put("limit", policy.limit());
+        row.put("windowSeconds",
+                policy.window() == null ? null : policy.window().toSeconds());
+        row.put("identity", identityLabel(policy));
+        FailureMode failureMode = policy.onRedisError() != null
+                ? policy.onRedisError()
+                : properties.getOnRedisError();
+        row.put("redisFailureMode", failureMode.name());
+        row.put("redisFailureModeLabel", switch (failureMode) {
+            case FAIL_OPEN -> "Fail open";
+            case FAIL_CLOSED -> "Fail closed";
+        });
+        return row;
+    }
+
+    /** The identity token the enforcement path charges, so the console names what is limited. */
+    private static String identityLabel(PolicyDocument policy) {
+        if (policy.scope() == Scope.USER) {
+            return "USER";
+        }
+        if (policy.scope() == Scope.GLOBAL) {
+            return "GLOBAL";
+        }
+        if (policy.scope() == Scope.APPLICATION) {
+            return "APPLICATION";
+        }
+        return "IP";
+    }
+
+    private static String safeSummary(PolicyDocument policy) {
+        try {
+            return policy.describeParameters();
+        } catch (RuntimeException e) {
+            return "incomplete";
+        }
+    }
+
+    private Map<String, Object> legacyRow(Policy policy) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", policy.id());
+        row.put("method", policy.method());
+        row.put("path", policy.path());
+        row.put("algorithm", "FIXED_WINDOW");
+        row.put("scope", policy.identity() == RateLimitProperties.Identity.USER ? "USER" : "IP");
+        row.put("parameterSummary",
+                policy.limit() + " per " + policy.window().toSeconds() + "s");
+        row.put("enabled", true);
+        row.put("version", 1);
+        row.put("limit", policy.limit());
+        row.put("windowSeconds", policy.window().toSeconds());
+        row.put("identity", policy.identity().name());
+        FailureMode failureMode = policy.failureMode(properties.getOnRedisError());
+        row.put("redisFailureMode", failureMode.name());
+        row.put("redisFailureModeLabel", switch (failureMode) {
+            case FAIL_OPEN -> "Fail open";
+            case FAIL_CLOSED -> "Fail closed";
+        });
+        return row;
     }
 }

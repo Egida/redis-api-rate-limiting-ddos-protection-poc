@@ -2,10 +2,16 @@
 export interface PolicySummary {
   id: string;
   method: string;
-  path: string;
-  limit: number;
-  windowSeconds: number;
-  identity: 'IP' | 'USER';
+  path: string | null;
+  limit: number | null;
+  windowSeconds: number | null;
+  identity: string;
+  /** Absent on backends older than the managed-metadata change, so the table must tolerate null. */
+  algorithm?: string | null;
+  scope?: string | null;
+  parameterSummary?: string | null;
+  enabled?: boolean;
+  version?: number;
   redisFailureMode: 'FAIL_OPEN' | 'FAIL_CLOSED';
   redisFailureModeLabel: string;
 }

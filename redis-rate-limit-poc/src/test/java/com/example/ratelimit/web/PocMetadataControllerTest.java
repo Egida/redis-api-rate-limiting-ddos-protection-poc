@@ -2,10 +2,20 @@ package com.example.ratelimit.web;
 
 import java.util.Map;
 
+import com.example.ratelimit.RedisTestSupport;
+import com.example.ratelimit.policy.ManagedPolicyStore;
+import com.example.ratelimit.policy.PolicySeeder;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
+import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -14,30 +24,75 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * The read-only endpoint backing the RateGuard policy table. Redis is not required: it reads bound
- * configuration only.
+ * The read-only endpoint backing the RateGuard policy table. It serves the managed policies from
+ * shared Redis, so the test reseeds the baseline before each method: the shared Testcontainers
+ * Redis outlives any single test class, and another class's leftover documents must never leak in.
  */
-@SpringBootTest
+@SpringBootTest(properties = {
+        "ratelimit.admin.username=pocadmin",
+        "ratelimit.admin.password=admin123",
+        "ratelimit.admin.raw-password=true"
+})
 @AutoConfigureMockMvc
+@Import(PocMetadataControllerTest.RedisConfig.class)
 class PocMetadataControllerTest {
+
+    @TestConfiguration
+    static class RedisConfig {
+        @Bean
+        @Primary
+        LettuceConnectionFactory testConnectionFactory() {
+            var container = RedisTestSupport.redis();
+            var config = new RedisStandaloneConfiguration(container.getHost(),
+                    container.getMappedPort(RedisTestSupport.REDIS_PORT));
+            var factory = new LettuceConnectionFactory(config);
+            factory.afterPropertiesSet();
+            return factory;
+        }
+    }
 
     @Autowired
     MockMvc mvc;
 
+    @Autowired
+    ManagedPolicyStore store;
+
+    @Autowired
+    PolicySeeder seeder;
+
+    private static String basic(String username, String password) {
+        return "Basic " + java.util.Base64.getEncoder().encodeToString(
+                (username + ":" + password).getBytes());
+    }
+
+    @BeforeEach
+    void reseedBaseline() {
+        store.reset("test-setup");
+        seeder.seed("test-setup");
+    }
+
     @Test
-    void policyEndpointIsReadableWithoutCredentials() throws Exception {
-        mvc.perform(get("/api/poc/policies"))
+    void policyEndpointIsReadableWithAdminCredentials() throws Exception {
+        mvc.perform(get("/api/poc/policies")
+                        .header("Authorization", basic("pocadmin", "admin123")))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.editable").value(false))
-                .andExpect(jsonPath("$.source").value("rate-limit.policies (application.yml)"))
+                .andExpect(jsonPath("$.editable").value(true))
+                .andExpect(jsonPath("$.source").value("managed policy store (Redis)"))
                 .andExpect(jsonPath("$.limiterEnabled").value(true))
                 .andExpect(jsonPath("$.defaultRedisFailureMode").value("FAIL_OPEN"))
                 .andExpect(jsonPath("$.policyCount").value(3));
     }
 
     @Test
-    void everyShippedPolicyIsExposedWithItsConfiguredValues() throws Exception {
-        String body = mvc.perform(get("/api/poc/policies"))
+    void policyEndpointRejectsUnauthenticatedCallers() throws Exception {
+        mvc.perform(get("/api/poc/policies"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void everySeededPolicyIsExposedWithItsStoredValues() throws Exception {
+        String body = mvc.perform(get("/api/poc/policies")
+                        .header("Authorization", basic("pocadmin", "admin123")))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
 
@@ -47,6 +102,7 @@ class PocMetadataControllerTest {
                 .contains("\"limit\":100")
                 .contains("\"windowSeconds\":60")
                 .contains("\"identity\":\"IP\"")
+                .contains("\"algorithm\":\"FIXED_WINDOW\"")
                 .contains("\"redisFailureModeLabel\":\"Fail open\"");
 
         assertThat(body).contains("\"id\":\"login-attempt\"")
@@ -61,8 +117,27 @@ class PocMetadataControllerTest {
     }
 
     @Test
+    void consoleReflectsAnAdminEditWithoutRestart() throws Exception {
+        var stored = store.find("products-read").orElseThrow();
+        var updated = com.example.ratelimit.policy.PolicyDocument.builder(stored.id())
+                .name(stored.name()).route(stored.method(), stored.path())
+                .algorithm(stored.algorithm()).scope(stored.scope())
+                .window(java.time.Duration.ofMinutes(1), 7)
+                .version(2).timestamps(stored.createdAt(), java.time.Instant.now())
+                .updatedBy("test-setup").build();
+        store.save(updated, stored, "test-setup");
+
+        String body = mvc.perform(get("/api/poc/policies")
+                        .header("Authorization", basic("pocadmin", "admin123")))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(body).contains("\"id\":\"products-read\"").contains("\"limit\":7");
+    }
+
+    @Test
     void exposesNoCredentialsIdentitiesOrRedisKeys() throws Exception {
-        String body = mvc.perform(get("/api/poc/policies"))
+        String body = mvc.perform(get("/api/poc/policies")
+                        .header("Authorization", basic("pocadmin", "admin123")))
                 .andReturn().getResponse().getContentAsString();
 
         // Nothing here may reveal who called the API or how a counter is keyed.
@@ -75,25 +150,10 @@ class PocMetadataControllerTest {
     }
 
     @Test
-    void policiesMatchTheShippedYamlFile() throws Exception {
-        // Guards against the console drifting from application.yml.
-        Map<String, Object> body = new com.fasterxml.jackson.databind.ObjectMapper()
-                .readValue(mvc.perform(get("/api/poc/policies")).andReturn().getResponse().getContentAsString(),
-                        new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {
-                        });
-        var policies = (java.util.List<Map<String, Object>>) body.get("policies");
-        assertThat(policies).extracting("id", "limit", "windowSeconds", "identity")
-                .containsExactly(
-                        org.assertj.core.groups.Tuple.tuple("products-read", 100, 60, "IP"),
-                        org.assertj.core.groups.Tuple.tuple("login-attempt", 10, 60, "IP"),
-                        org.assertj.core.groups.Tuple.tuple("order-create", 30, 60, "USER"));
-    }
-
-    @Test
-    void doesNotRequireAuthenticationButDoesNotUnlockTheDemoRoutes() throws Exception {
-        // The console must load without credentials ...
-        mvc.perform(get("/api/poc/policies")).andExpect(status().isOk());
-        // ... while /api/orders stays protected.
+    void pocEndpointsRequireAdminWhileDemoRoutesStayProtected() throws Exception {
+        // /api/poc/** requires admin now...
+        mvc.perform(get("/api/poc/policies")).andExpect(status().isUnauthorized());
+        // ... while /api/orders stays protected for normal users.
         mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
                         .post("/api/orders"))
                 .andExpect(status().isUnauthorized());

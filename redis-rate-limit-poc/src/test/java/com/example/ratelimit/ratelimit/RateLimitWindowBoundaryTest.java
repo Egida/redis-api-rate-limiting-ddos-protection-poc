@@ -134,8 +134,6 @@ class RateLimitWindowBoundaryTest {
                 PolicyEnforcer.forExplicitPolicies(PolicyMatcher.fromYamlProperties(properties), store,
                         properties.getOnRedisError()),
                 new RateLimitIdentityResolver(properties),
-                // No API_KEY policy is exercised here, so the registry is never consulted.
-                new com.example.ratelimit.policy.ApiKeyRegistry(null, new ObjectMapper()),
                 new RateLimitMetrics(new SimpleMeterRegistry()),
                 properties, new ObjectMapper(), clock);
     }

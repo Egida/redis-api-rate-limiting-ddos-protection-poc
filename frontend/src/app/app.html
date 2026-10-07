@@ -7,28 +7,37 @@
       <h1>RateGuard</h1>
       <p class="brand-sub">API Protection Console</p>
     </div>
-    <span class="badge badge-env">LOCAL POC</span>
+    <span class="chip chip-env">LOCAL POC</span>
   </div>
 
   <div class="header-status">
-    <p class="service-state" role="status" aria-live="polite">
-      <span [class]="dotClass()" aria-hidden="true"></span>
-      <span>{{ stateText() }}</span>
-    </p>
-    <p class="last-checked">{{ lastCheckedText() }}</p>
-    <button type="button" (click)="refresh()" class="btn-secondary">Refresh</button>
+    @if (store.loggedIn()) {
+      <p class="service-state" role="status" aria-live="polite">
+        <span [class]="status.dotClass()" aria-hidden="true"></span>
+        <span>{{ status.stateText() }}</span>
+      </p>
+      <p class="last-checked">{{ status.lastCheckedText() }}</p>
+      <button type="button" class="btn-secondary" (click)="status.refresh()">Refresh</button>
+      <p class="session">
+        Signed in as <strong>{{ store.loginName() }}</strong>
+      </p>
+      <button type="button" class="btn-secondary" (click)="store.logout()">Sign out</button>
+    } @else {
+      <a class="btn-primary" routerLink="/admin/login">Admin sign in</a>
+    }
   </div>
 </header>
 
-<main id="main">
-  <p class="scope-note">
-    Counters are cumulative Actuator totals since the application started. They are not
-    per-minute rates, and they reset when the app restarts.
-  </p>
+@if (store.loggedIn()) {
+  <nav class="app-nav" aria-label="Console sections">
+    <a routerLink="/overview" routerLinkActive="active" ariaCurrentWhenActive="page">Overview</a>
+    <a routerLink="/policies" routerLinkActive="active" ariaCurrentWhenActive="page">Policies</a>
+    <a routerLink="/audit" routerLinkActive="active" ariaCurrentWhenActive="page">Audit</a>
+  </nav>
+}
 
-  <app-dashboard-page [snapshot]="snapshot()" />
-  <app-request-demo />
-  <app-admin-policies />
+<main id="main" tabindex="-1">
+  <router-outlet />
 </main>
 
 <footer>

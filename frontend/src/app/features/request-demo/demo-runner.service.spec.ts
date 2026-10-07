@@ -2,12 +2,12 @@ import { TestRequest, HttpTestingController, provideHttpClientTesting } from '@a
 import { TestBed } from '@angular/core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { DEMO_ROUTES } from '../../core/demo-catalog';
+import { DemoRoute } from '../../core/demo-catalog';
 import { DemoRunnerService } from './demo-runner.service';
 
-const products = DEMO_ROUTES.find((r) => r.id === 'products')!;
-const orders = DEMO_ROUTES.find((r) => r.id === 'orders')!;
-const login = DEMO_ROUTES.find((r) => r.id === 'login')!;
+const products: DemoRoute = { id: 'products', label: 'GET /api/products', method: 'GET', path: '/api/products', needsAuth: false, note: 'Public read route.' };
+const orders: DemoRoute = { id: 'orders', label: 'POST /api/orders', method: 'POST', path: '/api/orders', needsAuth: true, note: 'Authenticated route.' };
+const login: DemoRoute = { id: 'login', label: 'POST /api/login', method: 'POST', path: '/api/login', needsAuth: false, note: 'Credential route.' };
 
 type Respond = (request: TestRequest, index: number) => void;
 

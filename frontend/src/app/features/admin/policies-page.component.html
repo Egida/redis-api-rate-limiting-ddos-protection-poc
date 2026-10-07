@@ -1,0 +1,172 @@
+<section aria-labelledby="policies-heading">
+  <div class="page-head">
+    <div>
+      <h2 id="policies-heading">Policies</h2>
+      <p class="page-sub">
+        The authoritative list read from shared Redis. Saving applies to every instance immediately.
+      </p>
+    </div>
+    <button type="button" class="btn-primary" (click)="onCreate()">Create policy</button>
+  </div>
+
+  @if (store.capabilities(); as caps) {
+    <p class="note">
+      <strong>Composition:</strong> {{ caps.composition }} <strong>Topology:</strong> {{ caps.topology }}
+      A request must pass every policy that matches it, and a denial charges nothing.
+    </p>
+  }
+
+  @if (store.actionError(); as error) {
+    <p class="alert alert-bad" role="alert">{{ error }}</p>
+  }
+  @if (store.actionInfo(); as info) {
+    <p class="alert alert-ok" role="status">{{ info }}</p>
+  }
+
+  <div class="toolbar">
+    <label class="grow">
+      <span class="visually-hidden">Filter policies</span>
+      <input
+        type="search"
+        name="policy-filter"
+        placeholder="Filter by id, route, or algorithm"
+        [ngModel]="filter()"
+        (ngModelChange)="filter.set($event)"
+      />
+    </label>
+    <label>
+      <span class="visually-hidden">Filter by scope</span>
+      <select name="policy-scope" [ngModel]="scopeFilter()" (ngModelChange)="scopeFilter.set($event)">
+        <option value="">All scopes</option>
+        @for (scope of scopeOptions(); track scope) {
+          <option [value]="scope">{{ scope }}</option>
+        }
+      </select>
+    </label>
+    <p class="count" role="status">
+      {{ filtered().length }} of {{ policies().length }} policies
+    </p>
+  </div>
+
+  @if (store.loadError(); as error) {
+    <p class="alert alert-bad" role="alert">{{ error }}</p>
+    <button type="button" class="btn-secondary" (click)="store.load()" [disabled]="store.busy()">Retry</button>
+  } @else if (!store.loaded()) {
+    <p class="loading" role="status">Loading policies&#8230;</p>
+  } @else if (policies().length === 0) {
+    <p class="empty">
+      No policies are stored. Create one, or restart the API to seed the shipped defaults.
+    </p>
+  } @else if (filtered().length === 0) {
+    <p class="empty">No policy matches this filter. Clear it to see all {{ policies().length }}.</p>
+  } @else {
+    <table class="table">
+      <thead>
+        <tr>
+          <th scope="col">Policy</th>
+          <th scope="col">Route</th>
+          <th scope="col">Algorithm</th>
+          <th scope="col">Scope</th>
+          <th scope="col">Parameters</th>
+          <th scope="col">State</th>
+          <th scope="col"><span class="visually-hidden">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (policy of filtered(); track policy.id) {
+          <tr>
+            <td data-label="Policy">
+              <code>{{ policy.id }}</code>
+            </td>
+            <td data-label="Route"><code>{{ policy.method }} {{ policy.path ?? '(global)' }}</code></td>
+            <td data-label="Algorithm">{{ policy.algorithm }}</td>
+            <td data-label="Scope">{{ policy.scope }}</td>
+            <td data-label="Parameters">{{ policy.parameterSummary }}</td>
+            <td data-label="State">
+              <span class="chip" [class.chip-on]="policy.enabled" [class.chip-off]="!policy.enabled">
+                {{ policy.enabled ? 'On' : 'Off' }} &middot; v{{ policy.version }}
+              </span>
+            </td>
+            <td class="row-actions">
+              <button type="button" class="btn-secondary" (click)="onEdit(policy)">Edit</button>
+              <button
+                type="button"
+                class="btn-secondary"
+                (click)="onToggleEnabled(policy)"
+                [disabled]="store.busy()"
+              >
+                {{ policy.enabled ? 'Disable' : 'Enable' }}
+              </button>
+              <button type="button" class="btn-secondary" (click)="onProbe(policy)" [disabled]="probeRunning()">
+                Probe
+              </button>
+              @if (confirmDeleteId() === policy.id) {
+                <button type="button" class="btn-danger" (click)="onDelete(policy)" [disabled]="store.busy()">
+                  Confirm delete
+                </button>
+                <button type="button" class="btn-ghost" (click)="cancelDelete()">Cancel</button>
+              } @else {
+                <button type="button" class="btn-danger-ghost" (click)="armDelete(policy.id)">Delete</button>
+              }
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  }
+
+  @if (probePolicyId(); as probeId) {
+    @if (policyById().get(probeId); as policy) {
+      <div class="panel" role="region" aria-label="Policy probe">
+        <h3>Probe {{ policy.id }}</h3>
+        <p class="help">
+          Sends at most 30 sequential requests to
+          <code>{{ policy.method }} {{ policy.path ?? '(global)' }}</code>. Nothing is sent until you
+          press Start.
+        </p>
+        @if (!probeRunning() && !probeSummary()) {
+          <div class="row">
+            <label>
+              Requests (max 30)
+              <input
+                type="number"
+                name="probe-count"
+                min="1"
+                max="30"
+                [ngModel]="probeCount()"
+                (ngModelChange)="probeCount.set($event)"
+              />
+            </label>
+            <button type="button" class="btn-primary" (click)="onProbeStart(policy)">Start probe</button>
+          </div>
+        }
+        @if (probeRunning()) {
+          <p role="status">Sending probe traffic&#8230;</p>
+          <button type="button" class="btn-secondary" (click)="onProbeCancel()">Cancel</button>
+        }
+        @if (probeSummary(); as summary) {
+          <p>
+            Sent {{ summary.totalSent }}: {{ summary.success }} allowed, {{ summary.rejected }} rejected.
+            @if (summary.first429Index !== null) {
+              First 429 at request #{{ summary.first429Index }}.
+            } @else {
+              No 429 in this run.
+            }
+            @if (summary.lastRejection) {
+              Retry-After {{ summary.lastRejection.headers.retryAfter }}s on policy
+              {{ summary.lastRejection.headers.policy }}.
+            }
+          </p>
+          @if (probeWindowNote(); as note) {
+            <p class="help">{{ note }}</p>
+          }
+          <button type="button" class="btn-secondary" (click)="closeProbe()">Close</button>
+        }
+      </div>
+    }
+  }
+
+  @if (editorOpen()) {
+    <app-policy-editor [policyId]="editingId()" (closed)="onEditorClosed()" />
+  }
+</section>

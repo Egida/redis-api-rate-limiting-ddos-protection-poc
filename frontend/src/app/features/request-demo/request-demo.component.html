@@ -5,9 +5,19 @@
     <strong>429</strong> on purpose &mdash; that is the behaviour being demonstrated.
   </p>
 
-  <div class="route-note" role="note">{{ route().note }}</div>
+  @if (catalogError()) {
+    <p class="alert alert-warn" role="alert">{{ catalogError() }}</p>
+  }
 
-  <form class="controls" (submit)="$event.preventDefault(); onStart()">
+  @if (!catalogLoaded()) {
+    <p role="status">Loading demo catalog&hellip;</p>
+  } @else if (routes().length === 0) {
+    <p class="empty">No demo-capable routes are configured.</p>
+  } @else {
+    <div class="route-note" role="note">{{ route()?.note }}</div>
+  }
+
+  <form class="controls" (submit)="$event.preventDefault(); onStart()" [class.hidden]="!catalogLoaded() || routes().length === 0">
     <div class="field">
       <label for="demo-route">Route</label>
       <select
@@ -17,8 +27,8 @@
         (ngModelChange)="routeId.set($event)"
         [disabled]="running()"
       >
-        @for (r of routes; track r.id) {
-          <option [value]="r.id">{{ r.label }} &mdash; limit {{ r.expectedLimit }} per minute per {{ r.identity === 'USER' ? 'user' : 'IP' }}</option>
+        @for (r of routes(); track r.id) {
+          <option [value]="r.id">{{ r.label }} &mdash; {{ publicPolicies().find(p => p.method === r.method && p.path === r.path)?.limit ? publicPolicies().find(p => p.method === r.method && p.path === r.path)?.limit + ' per minute' : 'live limit unknown' }}</option>
         }
       </select>
     </div>
@@ -120,16 +130,21 @@
             Run stopped early.
           }
         </li>
-        <li class="compare">
-          @if (result.first429Index === route().expectedLimit + 1) {
-            Observed first 429 matches the configured limit of {{ route().expectedLimit }} per window.
-          } @else if (result.first429Index !== null) {
-            Configured limit is {{ route().expectedLimit }} per window; the first 429 came at a
-            different index, which usually means the window rolled over or the route was partly used.
-          } @else {
-            Configured limit is {{ route().expectedLimit }} per window.
-          }
-        </li>
+<li class="compare">
+            @if (result.first429Index !== null) {
+              First 429 observed at request #{{ result.first429Index }}.
+              @if (liveLimit() !== null && liveLimit()! > 0) {
+                <span class="compare-note">
+                  (Live limit: {{ liveLimit() }} per window; a different index usually means the window rolled over or the route was partly used.)
+                </span>
+              }
+            } @else {
+              No 429 observed.
+              @if (liveLimit() !== null && liveLimit()! > 0) {
+                <span class="compare-note"> (Live limit: {{ liveLimit() }} per window.)</span>
+              }
+            }
+          </li>
       </ul>
       <p class="result-note">
         Browser-observed since this page opened. Statuses &mdash; {{ statusBreakdown() || 'none' }}.

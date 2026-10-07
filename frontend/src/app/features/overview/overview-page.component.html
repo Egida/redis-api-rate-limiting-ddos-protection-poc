@@ -1,0 +1,14 @@
+<section aria-labelledby="overview-heading">
+  <div class="page-head">
+    <div>
+      <h2 id="overview-heading">Overview</h2>
+      <p class="page-sub">
+        Live service state and cumulative counters since the application started. These totals are
+        not per-minute rates and reset when the API restarts.
+      </p>
+    </div>
+  </div>
+
+  <app-dashboard-page [snapshot]="status.snapshot()" />
+  <app-request-demo />
+</section>

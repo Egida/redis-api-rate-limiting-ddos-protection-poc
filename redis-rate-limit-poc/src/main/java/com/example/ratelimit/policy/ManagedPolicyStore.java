@@ -86,6 +86,19 @@ public class ManagedPolicyStore {
             return {1, tonumber(ARGV[4])}
             """, List.class);
 
+    /** Atomic batch read of all policy documents in one Redis round trip. KEYS[1] = INDEX. */
+    private static final RedisScript<List> READ_ALL_DOCS = new DefaultRedisScript<>("""
+            local ids = redis.call('SMEMBERS', KEYS[1])
+            local docs = {}
+            for i, id in ipairs(ids) do
+              local doc = redis.call('HGET', 'ratelimit:policy:v1:doc:' .. id, 'doc')
+              if doc then
+                table.insert(docs, doc)
+              end
+            end
+            return docs
+            """, List.class);
+
     private final StringRedisTemplate redis;
     private final ObjectMapper mapper;
 
@@ -96,39 +109,59 @@ public class ManagedPolicyStore {
 
     /** True when a first-run seed has already happened, so admin edits are never overwritten. */
     public boolean isSeeded() {
-        return Boolean.TRUE.equals(redis.hasKey(SEEDED));
+        try {
+            return Boolean.TRUE.equals(redis.hasKey(SEEDED));
+        } catch (DataAccessException e) {
+            throw new PolicyStoreUnavailableException("redis unavailable checking seeded marker", e);
+        }
     }
 
     public void markSeeded() {
-        redis.opsForValue().set(SEEDED, "1");
+        try {
+            redis.opsForValue().set(SEEDED, "1");
+        } catch (DataAccessException e) {
+            throw new PolicyStoreUnavailableException("redis unavailable marking seeded", e);
+        }
     }
 
     public Optional<PolicyDocument> find(String id) {
-        var ops = redis.opsForHash();
-        Object json = ops.get(docKey(id), "doc");
-        if (json == null) {
-            return Optional.empty();
-        }
         try {
+            var ops = redis.opsForHash();
+            Object json = ops.get(docKey(id), "doc");
+            if (json == null) {
+                return Optional.empty();
+            }
             return Optional.of(mapper.readValue(json.toString(), PolicyDocument.class));
+        } catch (DataAccessException e) {
+            throw new PolicyStoreUnavailableException("redis unavailable reading policy " + id, e);
         } catch (Exception e) {
             throw new PolicyStoreException("stored policy " + id + " is not readable JSON", e);
         }
     }
 
-    /** Every policy, ordered by id so the admin list is stable across instances. */
+    /** Every policy, ordered by id so the admin list is stable across instances. Executes in 1 Redis round trip. */
     public List<PolicyDocument> findAll() {
-        Set<String> ids = redis.opsForSet().members(INDEX);
-        if (ids == null || ids.isEmpty()) {
-            return List.of();
+        try {
+            @SuppressWarnings("unchecked")
+            List<Object> rawDocs = redis.execute(READ_ALL_DOCS, List.of(INDEX));
+            if (rawDocs == null || rawDocs.isEmpty()) {
+                return List.of();
+            }
+            var out = new ArrayList<PolicyDocument>(rawDocs.size());
+            for (Object raw : rawDocs) {
+                if (raw != null) {
+                    try {
+                        out.add(mapper.readValue(raw.toString(), PolicyDocument.class));
+                    } catch (Exception e) {
+                        log.warn("skipping unreadable policy doc in findAll: {}", e.getMessage());
+                    }
+                }
+            }
+            out.sort((a, b) -> a.id().compareTo(b.id()));
+            return out;
+        } catch (DataAccessException e) {
+            throw new PolicyStoreUnavailableException("redis unavailable listing policies", e);
         }
-        List<String> sorted = new ArrayList<>(ids);
-        sorted.sort(String::compareTo);
-        var out = new ArrayList<PolicyDocument>();
-        for (String id : sorted) {
-            find(id).ifPresent(out::add);
-        }
-        return out;
     }
 
     /**
@@ -152,8 +185,13 @@ public class ManagedPolicyStore {
 
         String now = document.updatedAt().toString();
         String created = document.createdAt().toString();
-        List<Long> result = redis.execute(WRITE, List.of(docKey(document.id()), INDEX),
-                String.valueOf(mode), document.id(), json, String.valueOf(document.version()), now, created);
+        List<Long> result;
+        try {
+            result = redis.execute(WRITE, List.of(docKey(document.id()), INDEX),
+                    String.valueOf(mode), document.id(), json, String.valueOf(document.version()), now, created);
+        } catch (DataAccessException e) {
+            throw new PolicyStoreUnavailableException("redis unavailable writing policy " + document.id(), e);
+        }
         if (result == null || result.size() < 2) {
             throw new PolicyStoreUnavailableException("redis returned no result for the policy write", null);
         }
@@ -173,8 +211,13 @@ public class ManagedPolicyStore {
     }
 
     public void delete(String id, String actor, long resultingVersion) {
-        List<Long> result = redis.execute(WRITE, List.of(docKey(id), INDEX),
-                String.valueOf(MODE_DELETE), id, "", "0", "", "");
+        List<Long> result;
+        try {
+            result = redis.execute(WRITE, List.of(docKey(id), INDEX),
+                    String.valueOf(MODE_DELETE), id, "", "0", "", "");
+        } catch (DataAccessException e) {
+            throw new PolicyStoreUnavailableException("redis unavailable deleting policy " + id, e);
+        }
         if (result == null || result.size() < 2) {
             throw new PolicyStoreUnavailableException("redis returned no result for the policy delete", null);
         }
@@ -188,7 +231,12 @@ public class ManagedPolicyStore {
     /** Newest first, capped at {@link #AUDIT_MAX_ENTRIES} entries in Redis. */
     public List<AuditEntry> audit(int limit) {
         int capped = Math.max(1, Math.min(limit, AUDIT_MAX_ENTRIES));
-        List<String> raw = redis.opsForList().range(AUDIT, 0, capped - 1);
+        List<String> raw;
+        try {
+            raw = redis.opsForList().range(AUDIT, 0, capped - 1);
+        } catch (DataAccessException e) {
+            throw new PolicyStoreUnavailableException("redis unavailable reading audit log", e);
+        }
         if (raw == null) {
             return List.of();
         }
@@ -250,17 +298,21 @@ public class ManagedPolicyStore {
 
     /** Deletes every policy, the audit list and the seeded marker. Intentional local reset only. */
     public int reset(String actor) {
-        Collection<String> ids = redis.opsForSet().members(INDEX);
-        int removed = 0;
-        if (ids != null) {
-            for (String id : ids) {
-                redis.delete(docKey(id));
-                removed++;
+        try {
+            Collection<String> ids = redis.opsForSet().members(INDEX);
+            int removed = 0;
+            if (ids != null) {
+                for (String id : ids) {
+                    redis.delete(docKey(id));
+                    removed++;
+                }
             }
+            redis.delete(List.of(INDEX, AUDIT, SEEDED, META));
+            log.warn("policy store reset by {}: {} policies removed", actor, removed);
+            return removed;
+        } catch (DataAccessException e) {
+            throw new PolicyStoreUnavailableException("redis unavailable during policy store reset", e);
         }
-        redis.delete(List.of(INDEX, AUDIT, SEEDED, META));
-        log.warn("policy store reset by {}: {} policies removed", actor, removed);
-        return removed;
     }
 
     private static String docKey(String id) {

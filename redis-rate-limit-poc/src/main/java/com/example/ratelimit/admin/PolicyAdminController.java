@@ -50,13 +50,10 @@ public class PolicyAdminController {
 
     private final ManagedPolicyStore store;
     private final PolicySeeder seeder;
-    private final com.example.ratelimit.policy.ApiKeyRegistry keys;
 
-    public PolicyAdminController(ManagedPolicyStore store, PolicySeeder seeder,
-            com.example.ratelimit.policy.ApiKeyRegistry keys) {
+    public PolicyAdminController(ManagedPolicyStore store, PolicySeeder seeder) {
         this.store = store;
         this.seeder = seeder;
-        this.keys = keys;
     }
 
     @GetMapping("/policies")
@@ -129,9 +126,8 @@ public class PolicyAdminController {
                                         + "wide route pattern shares one quota across endpoints."),
                         new ScopeCapability("GLOBAL", true,
                                 "One quota shared by every route and identity on every instance."),
-                        new ScopeCapability("API_KEY", true,
-                                "Server-validated key from the X-API-Key header, resolved to owner and tier. "
-                                        + "Manage keys under /api/admin/rate-limit/keys; only digests are stored.")),
+                        new ScopeCapability("APPLICATION", true,
+                                "One quota shared across all in-scope API routes, regardless of IP or user.")),
                 "AND: every applicable enabled policy must allow. One atomic batch inspects all "
                         + "counters before charging any, so a denial charges nothing anywhere.",
                 "single-redis: batch scripts span keys without hash tags; Redis Cluster is unsupported.");
@@ -238,44 +234,6 @@ public class PolicyAdminController {
         int removed = store.reset(actor(auth));
         int reseeded = seeder.seed(actor(auth));
         return ResponseEntity.ok(new ResetResponse(removed, reseeded, Instant.now()));
-    }
-
-    /**
-     * Issues an API key. The raw secret is in this response exactly once; it is never stored and
-     * cannot be recovered. Only the digest reaches Redis.
-     */
-    @PostMapping("/keys")
-    public ResponseEntity<KeyResponse> createKey(@RequestBody KeyRequest request, Authentication auth) {
-        var created = keys.create(request.owner(), request.tier(), actor(auth));
-        return ResponseEntity.status(HttpStatus.CREATED).body(new KeyResponse(
-                created.metadata().keyId(), created.metadata().owner(), created.metadata().tier(),
-                created.metadata().enabled(), created.metadata().createdAt(), created.rawKey()));
-    }
-
-    /** Key metadata. Digests and owners only, never raw secrets. */
-    @GetMapping("/keys")
-    public List<KeyMetadata> listKeys() {
-        return keys.list().stream()
-                .map(k -> new KeyMetadata(k.keyId(), k.owner(), k.tier(), k.enabled(), k.createdAt()))
-                .toList();
-    }
-
-    @DeleteMapping("/keys/{keyId}")
-    public ResponseEntity<Void> revokeKey(@PathVariable String keyId, Authentication auth) {
-        if (!keys.revoke(keyId, actor(auth))) {
-            return ResponseEntity.notFound().build();
-        }
-        return ResponseEntity.noContent().build();
-    }
-
-    public record KeyRequest(String owner, String tier) {
-    }
-
-    public record KeyResponse(String keyId, String owner, String tier, boolean enabled, Instant createdAt,
-            String key) {
-    }
-
-    public record KeyMetadata(String keyId, String owner, String tier, boolean enabled, Instant createdAt) {
     }
 
     public record AuditEntryResponse(Instant at, String actor, String policyId, String operation,

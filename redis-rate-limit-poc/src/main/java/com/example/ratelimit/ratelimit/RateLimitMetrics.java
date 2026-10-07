@@ -14,7 +14,7 @@ import org.springframework.stereotype.Component;
 public class RateLimitMetrics {
 
     public enum Outcome {
-        ALLOWED, REJECTED, ERROR
+        ALLOWED, REJECTED, STORE_ERROR, UNAUTHENTICATED, ERROR
     }
 
     private final MeterRegistry registry;

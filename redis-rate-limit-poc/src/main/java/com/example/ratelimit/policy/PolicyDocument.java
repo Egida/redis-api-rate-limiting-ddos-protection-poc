@@ -61,14 +61,35 @@ public record PolicyDocument(
     public String describeParameters() {
         return switch (algorithm) {
             case FIXED_WINDOW, SLIDING_WINDOW, SLIDING_WINDOW_COUNTER ->
-                    "%d per %s".formatted(limit, window);
+                    "%d per %s".formatted(limit, humanDuration(window));
             case TOKEN_BUCKET ->
-                    "burst %d, refill %s per %s".formatted(capacity, cost == null ? 1 : cost, refillInterval);
+                    "burst %d, refill %s per %s".formatted(capacity, cost == null ? 1 : cost,
+                            humanDuration(refillInterval));
             case LEAKY_BUCKET ->
                     "drain %d/s, queue %s".formatted(drainRate, queueCapacity);
             case CONCURRENCY_LIMIT ->
-                    "max %d in flight, lease %s".formatted(maxConcurrent, leaseDuration);
+                    "max %d in flight, lease %s".formatted(maxConcurrent, humanDuration(leaseDuration));
         };
+    }
+
+    /** "PT1M" reads badly in a table; the UI shows durations, never raw ISO strings. */
+    private static String humanDuration(java.time.Duration duration) {
+        if (duration == null) {
+            return "—";
+        }
+        long seconds = duration.toSeconds();
+        if (seconds < 60) {
+            return seconds + "s";
+        }
+        if (seconds % 3600 == 0) {
+            long hours = seconds / 3600;
+            return hours + (hours == 1 ? " hour" : " hours");
+        }
+        if (seconds % 60 == 0) {
+            long minutes = seconds / 60;
+            return minutes + (minutes == 1 ? " minute" : " minutes");
+        }
+        return seconds + "s";
     }
     /**
      * Rejects a document that is internally inconsistent. Runs before any write, so a bad save can
@@ -86,7 +107,7 @@ public record PolicyDocument(
             problems.add("method must be an HTTP verb or ANY");
         }
         // A GLOBAL policy deliberately has no route to match.
-        if (scope != Scope.GLOBAL) {
+        if (scope != Scope.GLOBAL && scope != Scope.APPLICATION) {
             if (path == null || !path.startsWith("/")) {
                 problems.add("path must start with '/' (only a GLOBAL policy may omit it)");
             }
@@ -97,7 +118,6 @@ public record PolicyDocument(
         if (scope == null) {
             problems.add("scope is required");
         }
-
         if (algorithm == Algorithm.FIXED_WINDOW || algorithm == Algorithm.SLIDING_WINDOW
                 || algorithm == Algorithm.SLIDING_WINDOW_COUNTER) {
             requirePositive(problems, "limit", limit);

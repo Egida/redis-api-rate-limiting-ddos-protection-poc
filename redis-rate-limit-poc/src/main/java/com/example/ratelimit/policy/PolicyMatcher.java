@@ -51,7 +51,8 @@ public class PolicyMatcher {
                     && !policy.method().equalsIgnoreCase(method)) {
                 continue;
             }
-            if (policy.scope() == Scope.GLOBAL || policy.path() == null || policy.path().isBlank()) {
+            if (policy.scope() == Scope.GLOBAL || policy.scope() == Scope.APPLICATION
+                    || policy.path() == null || policy.path().isBlank()) {
                 global.add(policy);
             } else if (matcher.match(policy.path(), path)) {
                 routeScoped.add(policy);

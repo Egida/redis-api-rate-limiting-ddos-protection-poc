@@ -69,19 +69,6 @@ export interface AuditRecord {
   changedFields: string[];
 }
 
-export interface ApiKeyMetadata {
-  keyId: string;
-  owner: string;
-  tier: string;
-  enabled: boolean;
-  createdAt: string;
-}
-
-export interface ApiKeyCreated extends ApiKeyMetadata {
-  /** Raw secret, present exactly once in the creation response. Show it once, then forget it. */
-  key: string;
-}
-
 export interface AdminApiError {
   status: number;
   code: string;

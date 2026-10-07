@@ -1,28 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { clampRequestCount, DEFAULT_REQUEST_COUNT, DEMO_ROUTES, MAX_REQUEST_COUNT, formatWindow } from './demo-catalog';
+import { clampRequestCount, DEFAULT_REQUEST_COUNT, MAX_REQUEST_COUNT, formatWindow } from './demo-catalog';
 
 describe('demo catalog', () => {
-  it('exposes only verified demo routes', () => {
-    expect(DEMO_ROUTES.map((r) => r.id)).toEqual(['products', 'login', 'orders']);
-    expect(DEMO_ROUTES.map((r) => r.method + ' ' + r.path)).toEqual([
-      'GET /api/products',
-      'POST /api/login',
-      'POST /api/orders',
-    ]);
-  });
-
-  it('matches the limits configured in application.yml', () => {
-    expect(DEMO_ROUTES.map((r) => r.expectedLimit)).toEqual([100, 10, 30]);
-    expect(DEMO_ROUTES.find((r) => r.id === 'orders')?.needsAuth).toBe(true);
-    expect(DEMO_ROUTES.find((r) => r.id === 'login')?.needsAuth).toBe(false);
-  });
-
-  it('documents that /api/login has no body contract', () => {
-    const login = DEMO_ROUTES.find((r) => r.id === 'login');
-    expect(login?.note).toContain('no request body');
-  });
-
   it('caps the request count', () => {
     expect(clampRequestCount(20)).toBe(20);
     expect(clampRequestCount('20')).toBe(20);

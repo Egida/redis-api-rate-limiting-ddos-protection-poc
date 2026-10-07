@@ -1,9 +1,9 @@
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { firstValueFrom } from 'rxjs';
 
-import { AdminApiService } from './admin-api.service';
+import { AdminApiService, TIMEOUT_STATUS } from './admin-api.service';
 
 const BASE = '/api/admin/rate-limit';
 
@@ -41,6 +41,26 @@ describe('AdminApiService', () => {
     const result = await login;
     expect(result.ok).toBe(false);
     expect(api.loggedIn()).toBe(false);
+  });
+
+  it('reports a client-side timeout as a timeout error, never "HTTP undefined"', async () => {
+    vi.useFakeTimers();
+    try {
+      // Issue the request but never flush it: the 8s timeout is the only thing that can settle it.
+      const pending = firstValueFrom(api.login('admin', 'secret'));
+      http.expectOne(`${BASE}/policies`);
+      await vi.advanceTimersByTimeAsync(8000);
+
+      const result = await pending;
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('unreachable');
+      expect(result.error.code).toBe('timeout');
+      expect(result.error.status).toBe(TIMEOUT_STATUS);
+      expect(result.error.message).not.toContain('undefined');
+      expect(api.loggedIn()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('maps a 409 body to a version_conflict error', async () => {
@@ -82,31 +102,6 @@ describe('AdminApiService', () => {
     const list = await firstValueFrom(api.list());
     expect(list).toMatchObject({ code: 'not-logged-in' });
     http.expectNone(`${BASE}/policies`);
-  });
-
-  it('issues a key once and revokes it', async () => {
-    await loginAsAdmin();
-    const created = firstValueFrom(api.createKey('owner-a', 'standard'));
-    http.expectOne(`${BASE}/keys`).flush({
-      keyId: 'abc12345',
-      owner: 'owner-a',
-      tier: 'standard',
-      enabled: true,
-      createdAt: '2026-01-01T00:00:00Z',
-      key: 'rg_secret-once',
-    });
-    expect(await created).toMatchObject({ keyId: 'abc12345', key: 'rg_secret-once' });
-
-    const keys = firstValueFrom(api.listKeys());
-    http.expectOne(`${BASE}/keys`).flush([
-      { keyId: 'abc12345', owner: 'owner-a', tier: 'standard', enabled: true },
-    ]);
-    const listed = await keys;
-    expect(JSON.stringify(listed)).not.toContain('rg_secret-once');
-
-    const revoked = firstValueFrom(api.revokeKey('abc12345'));
-    http.expectOne(`${BASE}/keys/abc12345`).flush(null);
-    expect(await revoked).toEqual({ revoked: true });
   });
 
   async function loginAsAdmin(): Promise<void> {

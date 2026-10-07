@@ -3,8 +3,10 @@
 A working proof of concept for API rate limiting with Redis as the shared counter store, plus an
 Angular console that shows the limit being hit in a browser.
 
-- **Backend** — Spring Boot 3.5.16 on Java 21, fixed-window counter in Redis, three policies with
-  independent failure modes, Actuator counters exposed for evidence.
+- **Backend** — Spring Boot 3.5.16 on Java 21, six Redis-backed rate algorithms (fixed window,
+  exact sliding window, sliding-window counter, token bucket, leaky-bucket policing, distributed
+  concurrency leases) enforced atomically, dynamic admin-managed policies, Actuator counters exposed
+  for evidence.
 - **Frontend** — Angular 22 standalone components, no UI framework, talks to the backend through a
   dev proxy.
 - **Proof** — the same counter is enforced by **two separate JVMs**, so the limit is genuinely
@@ -23,7 +25,7 @@ Everything below was run and observed on this machine. Numbers are measured, not
 | 3 | The limit is **global**, not per instance | `08-two-instance-demo-results.png` — two JVMs on 18081/18082, **60** requests split across both, one shared key with `pttl 17760` |
 | 4 | Counting survives a Redis restart | `TTL` and counter expiry in `verify-all.ps1` |
 | 5 | The system degrades predictably when Redis dies | Per-policy fail-open / fail-closed below |
-| 6 | The whole thing is testable headlessly | 63 backend tests + 25 frontend tests, green |
+| 6 | The whole thing is testable headlessly | 109 backend tests + 55 frontend tests, green |
 
 ---
 
@@ -79,6 +81,11 @@ The split is the interesting part. A read-heavy catalogue route fails **open** �
 you a counter, not availability. A credential route fails **closed** — a lost Redis must never
 become unlimited login attempts. That asymmetry is the whole argument for per-policy failure modes,
 and it is why one global setting would be wrong here.
+
+Four scopes are supported: **ENDPOINT** (per route), **IP** (per client IP), **USER** (per authenticated
+principal), and **GLOBAL** / **APPLICATION** (one shared quota across all in-scope API routes, regardless
+of IP or user). `GLOBAL` is the legacy name; `APPLICATION` is the same behavior with a clearer label.
+Existing `GLOBAL` policies keep working unchanged.
 
 ---
 
@@ -191,7 +198,7 @@ Everything below was executed against the code in this repository.
 ### Backend — `mvn -B clean verify`
 
 ```
-Tests run: 63, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 109, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS in 47.7 s
 ```
 
@@ -201,8 +208,8 @@ a mock. Java 21.0.12.1, Maven 3.9.16.
 ### Frontend — `npm test`
 
 ```
-Test Suites: 5 passed, 5 total
-Tests:       25 passed, 25 total
+Test Suites: 9 passed, 9 total
+Tests:       55 passed, 55 total
 Time:        4.46 s
 ```
 
@@ -257,9 +264,9 @@ Stated plainly, because a POC that hides these is not a POC:
 
 - **Single-node Redis.** The counter is shared correctly, but there is no Redis Cluster or Sentinel
   failover. If Redis dies, the configured failure mode applies — it does not recover.
-- **Fixed window, not sliding.** A client can send 2× the limit across a window boundary. A
-  sliding-window or token-bucket algorithm would close that; this uses `INCR` + `EXPIRE` because the
-  point is to show shared state, not to be the most sophisticated limiter available.
+- **Fixed window boundaries.** A fixed-window policy still allows roughly **2× the limit across
+  a window boundary**. Exact sliding-window and token-bucket policies are available per route for
+  cases where that matters; the sliding-window counter is approximate by design.
 - **Client IP by `X-Forwarded-For`.** Behind a proxy this needs a trusted-proxy list. Fine for a POC,
   not for production.
 - **No persistence of rejections.** Blocked requests are counted in Actuator, not written anywhere

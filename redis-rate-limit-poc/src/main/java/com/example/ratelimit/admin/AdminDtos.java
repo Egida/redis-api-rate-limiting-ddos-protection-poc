@@ -70,7 +70,8 @@ public final class AdminDtos {
 
         public static PolicyResponse from(PolicyDocument p) {
             return new PolicyResponse(p.id(), p.name(), p.method(), p.path(), p.algorithm(),
-                    p.algorithm() != null && p.algorithm().isImplemented(), p.scope(), p.window(), p.limit(),
+                    p.algorithm() != null && p.algorithm().isImplemented(), p.scope(),
+                    p.window(), p.limit(),
                     p.capacity(), p.refillInterval(), p.cost(), p.drainRate(), p.queueCapacity(),
                     p.maxConcurrent(), p.leaseDuration(), p.enabled(), p.onRedisError(), p.version(),
                     p.createdAt(), p.updatedAt(), p.updatedBy(), safeSummary(p));

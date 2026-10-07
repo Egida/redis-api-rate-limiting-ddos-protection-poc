@@ -17,9 +17,9 @@ public enum Scope {
     /** Authenticated principal. A USER policy may optionally span several routes. */
     USER,
 
-    /** Server-validated API key digest, resolved to an owner and tier from trusted data. */
-    API_KEY,
-
     /** One quota shared by every route, identity and application instance. */
-    GLOBAL
+    GLOBAL,
+
+    /** One quota shared across all in-scope API routes, regardless of IP or user. */
+    APPLICATION
 }

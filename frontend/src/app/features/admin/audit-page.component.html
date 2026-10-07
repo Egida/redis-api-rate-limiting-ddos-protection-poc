@@ -1,0 +1,99 @@
+<section aria-labelledby="audit-heading">
+  <div class="page-head">
+    <div>
+      <h2 id="audit-heading">Audit</h2>
+      <p class="page-sub">Every policy change, with the actor and the resulting version.</p>
+    </div>
+  </div>
+
+  @if (store.actionError(); as error) {
+    <p class="alert alert-bad" role="alert">{{ error }}</p>
+  }
+
+  <div class="toolbar">
+    <label>
+      <span class="visually-hidden">Records to load</span>
+      <select
+        name="audit-limit"
+        [ngModel]="store.auditLimit()"
+        (ngModelChange)="onLimitChange($event)"
+      >
+        @for (limit of limits; track limit) {
+          <option [value]="limit">Latest {{ limit }}</option>
+        }
+      </select>
+    </label>
+    <p class="count" role="status">
+      {{ store.audit().length }} records loaded, {{ page() + 1 }} of {{ pageCount() }} pages
+    </p>
+    <div class="row">
+      <button type="button" class="btn-secondary" (click)="previousPage()" [disabled]="page() === 0">
+        Previous
+      </button>
+      <button
+        type="button"
+        class="btn-secondary"
+        (click)="nextPage()"
+        [disabled]="page() >= pageCount() - 1"
+      >
+        Next
+      </button>
+    </div>
+  </div>
+
+  @if (store.loadError(); as error) {
+    <p class="alert alert-bad" role="alert">{{ error }}</p>
+    <button type="button" class="btn-secondary" (click)="onLimitChange(store.auditLimit())">Retry</button>
+  } @else if (store.audit().length === 0) {
+    <p class="empty">No audit entries in this window.</p>
+  } @else {
+    <table class="table table-compact">
+      <thead>
+        <tr>
+          <th scope="col">When</th>
+          <th scope="col">Actor</th>
+          <th scope="col">Policy</th>
+          <th scope="col">Operation</th>
+          <th scope="col">Version</th>
+          <th scope="col">Changed fields</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (entry of visible(); track keyFor(entry)) {
+          <tr>
+            <td data-label="When" class="nowrap">{{ formatTime(entry.at) }}</td>
+            <td data-label="Actor">{{ entry.actor }}</td>
+            <td data-label="Policy"><code>{{ entry.policyId }}</code></td>
+            <td data-label="Operation">{{ entry.operation }}</td>
+            <td data-label="Version">v{{ entry.resultingVersion }}</td>
+            <td data-label="Changed fields">
+              @if (entry.changedFields.length === 0) {
+                <span class="muted">&mdash;</span>
+              } @else {
+                <span>{{ previewFields(entry.changedFields) }}</span>
+                @if (hiddenFieldCount(entry.changedFields) > 0) {
+                  <span class="muted">+{{ hiddenFieldCount(entry.changedFields) }} more</span>
+                }
+                <button
+                  type="button"
+                  class="btn-ghost"
+                  (click)="toggle(keyFor(entry))"
+                  [attr.aria-expanded]="isExpanded(keyFor(entry))"
+                >
+                  {{ isExpanded(keyFor(entry)) ? 'Hide details' : 'Show details' }}
+                </button>
+                @if (isExpanded(keyFor(entry))) {
+                  <ul class="detail-list">
+                    @for (field of entry.changedFields; track field) {
+                      <li><code>{{ field }}</code></li>
+                    }
+                  </ul>
+                }
+              }
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  }
+</section>

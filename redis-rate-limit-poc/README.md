@@ -40,8 +40,8 @@ Run the jar first, then `npm start`, and open http://localhost:4200.
 ## Tests
 
 ```bash
-mvn test                    # 63 tests, Redis supplied by Testcontainers
-cd ../frontend && npm test  # 25 Angular unit tests
+mvn test                    # 105 tests, Redis supplied by Testcontainers
+cd ../frontend && npm test  # 34 Angular unit tests
 ```
 
 ## Demonstrations

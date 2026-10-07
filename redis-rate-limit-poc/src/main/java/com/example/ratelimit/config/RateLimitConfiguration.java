@@ -31,9 +31,8 @@ public class RateLimitConfiguration {
 
     @Bean
     RateLimitFilter rateLimitFilter(PolicyEnforcer enforcer, RateLimitIdentityResolver identities,
-            com.example.ratelimit.policy.ApiKeyRegistry apiKeys, RateLimitMetrics metrics,
-            RateLimitProperties properties, ObjectMapper mapper, Clock clock) {
-        return new RateLimitFilter(enforcer, identities, apiKeys, metrics, properties, mapper, clock);
+            RateLimitMetrics metrics, RateLimitProperties properties, ObjectMapper mapper, Clock clock) {
+        return new RateLimitFilter(enforcer, identities, metrics, properties, mapper, clock);
     }
 
     /**

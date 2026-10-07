@@ -40,11 +40,17 @@ public class SecurityConfig {
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
                         .requestMatchers("/api/orders").authenticated()
                         .requestMatchers("/actuator/**").permitAll()
-                        // Read-only policy metadata for the local RateGuard console. No mutation
-                        // endpoint exists, and it exposes no keys, identities or credentials.
-                        .requestMatchers("/api/poc/**").permitAll()
+                        // Console metadata endpoints require admin: they expose live policy state.
+                        .requestMatchers("/api/poc/**").hasRole("ADMIN")
                         .anyRequest().permitAll())
-                .httpBasic(Customizer.withDefaults())
+                .httpBasic(basic -> basic
+                        .authenticationEntryPoint((request, response, authException) -> {
+                            // Do NOT send WWW-Authenticate: Basic — that triggers Chrome/Edge's
+                            // native "Sign in" popup. Return a plain 401 JSON instead.
+                            response.setStatus(401);
+                            response.setContentType("application/json");
+                            response.getWriter().write("{\"error\":\"unauthorized\",\"message\":\"Authentication required\"}");
+                        }))
                 .build();
     }
 

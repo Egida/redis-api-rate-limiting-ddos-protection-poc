@@ -4,6 +4,7 @@ import { Observable, catchError, map, of, timeout } from 'rxjs';
 
 import { API_CONFIG } from './api-config';
 import { HealthResponse, MetricResponse, PolicyResponse } from './models';
+import { AdminApiService } from './admin-api.service';
 
 export type SourcedReason =
   /** The meter or the value has not been recorded yet; a real zero, not a failure. */
@@ -33,6 +34,7 @@ const REQUEST_TIMEOUT_MS = 8000;
 export class ApiClientService {
   private readonly http = inject(HttpClient);
   private readonly config = inject(API_CONFIG);
+  private readonly admin = inject(AdminApiService);
 
   /**
    * Overall health only. Actuator runs with `show-details: never`, so there is no per-component
@@ -88,8 +90,13 @@ export class ApiClientService {
   }
 
   private get<T>(path: string): Observable<Sourced<T>> {
+    let headers = new HttpHeaders({ Accept: 'application/json' });
+    const auth = this.admin.authorizationHeader;
+    if (path.startsWith('/api/poc/') && auth) {
+      headers = headers.set('Authorization', auth);
+    }
     return this.http
-      .get<T>(this.url(path), { headers: new HttpHeaders({ Accept: 'application/json' }) })
+      .get<T>(this.url(path), { headers })
       .pipe(
         timeout(REQUEST_TIMEOUT_MS),
         map((body): Sourced<T> => ({ value: body, available: true, reason: null })),

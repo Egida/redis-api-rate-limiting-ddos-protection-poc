@@ -1,13 +1,11 @@
 import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
 import { Injectable, inject, signal } from '@angular/core';
-import { Observable, catchError, map, of, timeout } from 'rxjs';
+import { Observable, TimeoutError, catchError, map, of, timeout } from 'rxjs';
 
 import { API_CONFIG } from './api-config';
 import {
   AdminApiError,
   AdminPolicy,
-  ApiKeyCreated,
-  ApiKeyMetadata,
   AuditRecord,
   Capabilities,
   PolicyEdit,
@@ -15,6 +13,9 @@ import {
 
 const REQUEST_TIMEOUT_MS = 8000;
 const BASE = '/api/admin/rate-limit';
+
+/** Sentinel status for a client-side timeout. No HTTP response was ever received. */
+export const TIMEOUT_STATUS = -1;
 
 /**
  * Administration API client.
@@ -29,6 +30,12 @@ export class AdminApiService {
   private readonly config = inject(API_CONFIG);
 
   private credentials: { username: string; password: string } | null = null;
+
+  /** Basic auth header value when logged in, otherwise null. */
+  get authorizationHeader(): string | null {
+    if (!this.credentials) return null;
+    return 'Basic ' + btoa(`${this.credentials.username}:${this.credentials.password}`);
+  }
 
   /** True once a login attempt has succeeded against the backend. */
   readonly loggedIn = signal(false);
@@ -96,20 +103,6 @@ export class AdminApiService {
     return this.authed<AuditRecord[]>('GET', `/audit?limit=${limit}`);
   }
 
-  createKey(owner: string, tier: string): Observable<ApiKeyCreated | AdminApiError> {
-    return this.authed<ApiKeyCreated>('POST', '/keys', { owner, tier });
-  }
-
-  listKeys(): Observable<ApiKeyMetadata[] | AdminApiError> {
-    return this.authed<ApiKeyMetadata[]>('GET', '/keys');
-  }
-
-  revokeKey(keyId: string): Observable<{ revoked: true } | AdminApiError> {
-    return this.authed<void>('DELETE', `/keys/${encodeURIComponent(keyId)}`).pipe(
-      map((result) => (isAdminError(result) ? result : { revoked: true as const })),
-    );
-  }
-
   private authed<T>(method: string, path: string, body?: unknown): Observable<T | AdminApiError> {
     if (!this.credentials) {
       return of({ status: 0, code: 'not-logged-in', message: 'Log in first.', problems: [] });
@@ -131,11 +124,29 @@ export class AdminApiService {
       .request<T>(method, `${this.config.baseUrl}${BASE}${path}`, { headers, body })
       .pipe(
         timeout(REQUEST_TIMEOUT_MS),
-        catchError((error: HttpErrorResponse) => of(this.toError(error))),
+        catchError((error: unknown) => of(this.toError(error))),
       );
   }
 
-  private toError(error: HttpErrorResponse): AdminApiError {
+  /**
+   * Normalizes every failure mode into an AdminApiError.
+   *
+   * `status` is a real HTTP status when one arrived, and 0 for transport failures (unreachable,
+   * aborted) or -1 for a client-side timeout. That sentinel is what lets callers tell "the server
+   * said no" apart from "the request never got an answer", which are different operator problems.
+   */
+  private toError(error: unknown): AdminApiError {
+    if (error instanceof TimeoutError) {
+      return {
+        status: TIMEOUT_STATUS,
+        code: 'timeout',
+        message: `The API did not answer within ${REQUEST_TIMEOUT_MS / 1000}s. It may be starting up, or the request never reached it.`,
+        problems: [],
+      };
+    }
+    if (!(error instanceof HttpErrorResponse)) {
+      return { status: 0, code: 'unknown', message: 'Unexpected client error.', problems: [] };
+    }
     if (error.status === 0) {
       return { status: 0, code: 'unreachable', message: 'Backend unreachable.', problems: [] };
     }
